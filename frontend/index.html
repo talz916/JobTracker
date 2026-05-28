@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>JobHunter</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+
+<!-- Header -->
+<header class="header">
+  <h1>Job<span>Tracker</span></h1>
+  <button class="btn btn-secondary" id="sync-emails-btn">Sync Emails</button>
+  <button class="btn btn-secondary" id="sync-calendar-btn">Sync Calendar</button>
+  <button class="btn btn-primary" id="add-app-btn">+ Add Application</button>
+  <button class="btn btn-ghost" id="settings-btn" title="Settings">⚙</button>
+</header>
+
+<!-- Sync progress bar -->
+<div id="sync-progress" style="display:none">
+  <div id="sync-progress-bar"></div>
+  <div id="sync-progress-msg"></div>
+</div>
+
+<!-- Auth banner (shown when not authenticated) -->
+<div id="auth-banner" class="auth-banner" style="display:none">
+  <div>
+    <p id="auth-msg">Connect your Google account to start syncing emails and calendar events.</p>
+    <button class="btn btn-primary" id="auth-connect-btn">Connect Google Account</button>
+  </div>
+</div>
+
+<!-- Main content -->
+<div class="main-content" style="display:none">
+  <div class="main">
+
+    <!-- Stats row -->
+    <div class="stats-row">
+      <div class="stat-card">
+        <div class="label">Total Applied</div>
+        <div class="value" id="stat-total">—</div>
+        <div class="sub">all time</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Active</div>
+        <div class="value" id="stat-active">—</div>
+        <div class="sub">in pipeline</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Interview Rate</div>
+        <div class="value" id="stat-interview">—</div>
+        <div class="sub">of total applied</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Offer Rate</div>
+        <div class="value" id="stat-offer">—</div>
+        <div class="sub">of total applied</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Screen → Interview</div>
+        <div class="value" id="stat-screen">—</div>
+        <div class="sub">of phone screens</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Referral Interviews</div>
+        <div class="value" id="stat-referral">—</div>
+        <div class="sub">of interviews via referral</div>
+      </div>
+    </div>
+
+    <!-- Funnel -->
+    <div class="funnel-section">
+      <h2>Application Funnel <span style="font-size:12px;font-weight:400;color:var(--muted);margin-left:6px">applications that reached each stage</span></h2>
+      <div id="funnel-rows"></div>
+    </div>
+
+    <!-- Weekly volume -->
+    <div class="weekly-section">
+      <h2>Weekly Volume <span style="font-size:12px;font-weight:400;color:var(--muted);margin-left:6px">applications sent per week</span></h2>
+      <div class="weekly-chart" id="weekly-chart"></div>
+    </div>
+
+    <!-- Table -->
+    <div class="table-section">
+      <div class="table-header">
+        <h2>Applications</h2>
+        <input
+          type="text"
+          class="search-input"
+          id="filter-company"
+          placeholder="Search company…"
+        />
+        <select class="filter-select" id="filter-stage">
+          <!-- populated by JS -->
+        </select>
+        <button class="btn btn-secondary" id="merge-btn" style="display:none">Merge Selected</button>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th style="width:36px"><input type="checkbox" id="select-all-cb" title="Select all"></th>
+            <th class="sortable" data-col="company">Company <span class="sort-icon"></span></th>
+            <th class="sortable" data-col="role">Role <span class="sort-icon"></span></th>
+            <th class="sortable" data-col="stage">Stage <span class="sort-icon"></span></th>
+            <th class="sortable" data-col="applied_date">Applied <span class="sort-icon"></span></th>
+            <th class="sortable" data-col="last_updated">Last Update <span class="sort-icon"></span></th>
+            <th>Source</th>
+          </tr>
+        </thead>
+        <tbody id="app-tbody"></tbody>
+      </table>
+    </div>
+
+  </div>
+</div>
+
+<!-- Settings panel -->
+<div class="settings-panel" id="settings-panel">
+  <div class="settings-header">
+    <h2>Settings</h2>
+    <button class="btn btn-ghost" id="settings-close" title="Close">✕</button>
+  </div>
+
+  <div class="form-group">
+    <label>Gmail Label</label>
+    <input type="text" id="settings-label" placeholder="e.g. Job Hunt" />
+    <p class="hint">
+      Emails with this Gmail label are always synced. Leave blank to use keyword search only.
+    </p>
+  </div>
+
+  <div class="form-group">
+    <label>Ghosted after (days)</label>
+    <input type="number" id="settings-ghosted" min="7" max="365" value="30" />
+    <p class="hint">Applications with no update after this many days are auto-flagged as ghosted.</p>
+  </div>
+
+  <div class="form-group">
+    <label>Min. AI Confidence (0–1)</label>
+    <input type="number" id="settings-confidence" min="0" max="1" step="0.05" value="0.6" />
+    <p class="hint">Emails below this confidence score are skipped.</p>
+  </div>
+
+  <button class="btn btn-primary" id="settings-save" style="width:100%">Save Settings</button>
+
+  <hr style="border:none;border-top:1px solid var(--border);margin:20px 0" />
+
+  <div class="form-group">
+    <label>Re-classify All Emails</label>
+    <p class="hint">
+      Clears the email sync cache so every previously-processed thread is re-evaluated with the latest AI prompt on next sync. Useful after classifier improvements. Manual entries are never affected.
+    </p>
+    <button class="btn btn-secondary" id="settings-reclassify" style="width:100%">Clear Email Cache &amp; Re-sync</button>
+  </div>
+</div>
+
+<!-- Row drawer -->
+<div class="overlay" id="overlay"></div>
+<aside class="drawer" id="drawer">
+  <div class="drawer-header">
+    <div style="flex:1">
+      <h3 id="drawer-company"></h3>
+      <div class="company" id="drawer-role"></div>
+      <div style="margin-top:8px"><span class="badge" id="drawer-stage-badge"></span></div>
+    </div>
+    <button class="btn btn-ghost" id="drawer-close">✕</button>
+  </div>
+
+  <div class="drawer-body">
+
+    <!-- Meta -->
+    <div class="drawer-meta">
+      <div class="meta-item">
+        <div class="meta-label">Applied</div>
+        <div class="meta-value" id="drawer-applied"></div>
+      </div>
+      <div class="meta-item">
+        <div class="meta-label">Source</div>
+        <div class="meta-value" style="display:flex;align-items:center;gap:8px">
+          <span id="drawer-source"></span>
+          <button class="btn btn-secondary" id="drawer-refer-btn" style="padding:2px 9px;font-size:11px">Mark as Referred</button>
+        </div>
+      </div>
+      <div class="meta-item" style="grid-column:1/-1">
+        <div class="meta-label">Job URL</div>
+        <div class="meta-value" id="drawer-url"></div>
+      </div>
+      <div class="meta-item" style="grid-column:1/-1">
+        <div class="meta-label">Notes</div>
+        <div class="meta-value" id="drawer-notes"></div>
+      </div>
+    </div>
+
+    <!-- Move stage -->
+    <div class="move-stage-form">
+      <h4>Move to Stage</h4>
+      <div class="move-stage-row">
+        <select class="filter-select" id="move-stage-select" style="flex:1"></select>
+        <button class="btn btn-primary" id="move-stage-btn">Move</button>
+      </div>
+      <div style="margin-top:8px;display:flex;gap:8px">
+        <input
+          type="text"
+          class="search-input"
+          id="move-stage-notes"
+          placeholder="Optional note (e.g. recruiter called)"
+          style="flex:1"
+        />
+        <input
+          type="date"
+          class="search-input"
+          id="move-stage-date"
+          title="Date this happened (leave blank for today)"
+          style="width:140px"
+        />
+      </div>
+    </div>
+
+    <!-- Timeline -->
+    <div class="timeline">
+      <h4>Stage History</h4>
+      <div id="timeline-list"></div>
+    </div>
+
+  </div>
+
+  <div class="drawer-actions">
+    <button class="btn btn-secondary" id="drawer-edit-btn">Edit</button>
+    <button class="btn btn-danger" id="drawer-delete-btn">Delete</button>
+  </div>
+</aside>
+
+<!-- Add / Edit modal -->
+<div class="modal-overlay" id="modal-overlay">
+  <div class="modal">
+    <h3 id="modal-title">Add Application</h3>
+
+    <div class="form-group">
+      <label>Company *</label>
+      <input type="text" id="modal-company" placeholder="e.g. Acme Corp" />
+    </div>
+
+    <div class="form-row">
+      <div class="form-group">
+        <label>Role</label>
+        <input type="text" id="modal-role" placeholder="e.g. Software Engineer" />
+      </div>
+      <div class="form-group">
+        <label>Stage</label>
+        <select id="modal-stage">
+          <!-- populated by JS -->
+        </select>
+      </div>
+    </div>
+
+    <div class="form-row">
+      <div class="form-group">
+        <label>Date Applied</label>
+        <input type="date" id="modal-date" />
+      </div>
+      <div class="form-group">
+        <label>Source</label>
+        <select id="modal-source">
+          <option value="manual">Manual</option>
+          <option value="email">Email</option>
+          <option value="referral">Referral</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="form-group">
+      <label>Job URL</label>
+      <input type="url" id="modal-url" placeholder="https://..." />
+    </div>
+
+    <div class="form-group">
+      <label>Notes</label>
+      <textarea id="modal-notes" placeholder="Any notes about this application…"></textarea>
+    </div>
+
+    <div class="modal-actions">
+      <button class="btn btn-secondary" id="modal-cancel">Cancel</button>
+      <button class="btn btn-primary" id="modal-save">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Merge confirmation modal -->
+<div class="modal-overlay" id="merge-modal-overlay">
+  <div class="modal">
+    <h3>Merge Applications</h3>
+    <p style="color:var(--muted);font-size:13px;margin-bottom:16px">
+      Select which record to keep. All stage history will be combined and duplicates deleted.
+    </p>
+    <div class="form-group">
+      <label>Keep this record</label>
+      <select id="merge-keep-select" class="filter-select" style="width:100%"></select>
+    </div>
+    <div id="merge-summary" style="font-size:12px;color:var(--muted);margin-bottom:4px"></div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" id="merge-cancel">Cancel</button>
+      <button class="btn btn-danger" id="merge-confirm">Merge &amp; Delete Duplicates</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast container -->
+<div class="toast-container" id="toast-container"></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
