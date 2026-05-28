@@ -551,7 +551,7 @@ def get_stats() -> dict:
         "active": active,
         "phone_screen_rate": rate("phone_screen"),
         "interview_rate": rate("interview"),
-        "offer_rate": rate("offer", decimals=2),
+        "offer_rate": round(reached.get("offer", 0) / total * 100, 2) if total else 0,
         "rejection_rate": rate("rejected"),
         "screen_to_interview_rate": screen_to_interview_rate,
         "referral_interview_rate": referral_interview_rate,
