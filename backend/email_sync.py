@@ -155,7 +155,13 @@ def _process_thread(service, thread_id: str, min_confidence: float) -> Optional[
         event_date = None
 
     source = "referral" if result.is_referral else "email"
-    app = db.find_application_by_company(company)
+
+    # Match by (company, role) when role is known; otherwise route to oldest active position
+    if result.role:
+        app = db.find_application_by_company_and_role(company, result.role)
+    else:
+        app = db.find_oldest_active_application_by_company(company)
+
     if app is None:
         app = db.create_application(
             company=company,
@@ -166,10 +172,9 @@ def _process_thread(service, thread_id: str, min_confidence: float) -> Optional[
             notes=None,
             job_url=None,
         )
-    elif result.is_referral and app["source"] == "email":
-        # Upgrade source to referral if we now know it was referred
-        db.update_application(app["id"], source="referral")
     else:
+        if result.is_referral and app["source"] == "email":
+            db.update_application(app["id"], source="referral")
         if can_advance(app["stage"], result.stage):
             db.update_application(app["id"], stage=result.stage)
             app = db.get_application(app["id"])

@@ -14,6 +14,15 @@ from backend.models import (
     ApplicationCreate, ApplicationUpdate, MoveStageRequest,
     SettingsUpdate, MergeRequest, ALL_STAGES,
 )
+from pydantic import BaseModel
+
+
+class ReassignEventRequest(BaseModel):
+    application_id: int
+
+
+class UpdateEventStageRequest(BaseModel):
+    stage: str
 
 load_dotenv(override=True)
 
@@ -211,6 +220,26 @@ def get_events(app_id: int):
     return db.get_events(app_id)
 
 
+@app.post("/api/applications/{app_id}/log-event")
+def log_event(app_id: int, body: MoveStageRequest):
+    """Log a manual activity. Advances the stage if appropriate; never goes backward."""
+    from backend.models import can_advance
+    existing = db.get_application(app_id)
+    if not existing:
+        raise HTTPException(404, "Application not found")
+    if body.stage not in ALL_STAGES:
+        raise HTTPException(400, f"Invalid stage. Valid: {ALL_STAGES}")
+    if can_advance(existing["stage"], body.stage):
+        db.update_application(app_id, stage=body.stage)
+    db.insert_stage_event(
+        application_id=app_id, stage=body.stage, event_type="manual",
+        event_date=(body.event_date or datetime.utcnow()).isoformat(),
+        subject=body.notes or f"Logged: {body.stage}",
+        snippet=body.notes,
+    )
+    return db.get_application(app_id)
+
+
 @app.post("/api/applications/{app_id}/move-stage")
 def move_stage(app_id: int, body: MoveStageRequest):
     existing = db.get_application(app_id)
@@ -226,6 +255,32 @@ def move_stage(app_id: int, body: MoveStageRequest):
         snippet=body.notes,
     )
     return updated
+
+
+# ── Stage Events ───────────────────────────────────────────────────────────────
+
+@app.delete("/api/events/{event_id}", status_code=204)
+def delete_event(event_id: int):
+    if not db.delete_event(event_id):
+        raise HTTPException(404, "Event not found")
+
+
+@app.patch("/api/events/{event_id}/stage")
+def update_event_stage(event_id: int, body: UpdateEventStageRequest):
+    if body.stage not in ALL_STAGES:
+        raise HTTPException(400, f"Invalid stage. Valid: {ALL_STAGES}")
+    result = db.update_event_stage(event_id, body.stage)
+    if not result:
+        raise HTTPException(404, "Event not found")
+    return result
+
+
+@app.patch("/api/events/{event_id}/reassign")
+def reassign_event(event_id: int, body: ReassignEventRequest):
+    result = db.reassign_event(event_id, body.application_id)
+    if not result:
+        raise HTTPException(404, "Event or target application not found")
+    return result
 
 
 # ── Sync (background threads + progress polling) ───────────────────────────────

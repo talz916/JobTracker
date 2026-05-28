@@ -147,6 +147,32 @@ def find_application_by_company(company: str) -> Optional[dict]:
         return dict(row) if row else None
 
 
+def find_application_by_company_and_role(company: str, role: str) -> Optional[dict]:
+    """Match by both company and role (case-insensitive). Returns None if no match."""
+    with get_db() as conn:
+        row = conn.execute(
+            """SELECT * FROM applications
+               WHERE lower(company) = lower(?) AND lower(role) = lower(?) AND archived = 0""",
+            (company, role),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def find_oldest_active_application_by_company(company: str) -> Optional[dict]:
+    """Returns the oldest non-terminal application for a company (for role-ambiguous emails)."""
+    terminal = ('rejected', 'declined_offer', 'ghosted')
+    terminal_ph = ','.join('?' * len(terminal))
+    with get_db() as conn:
+        row = conn.execute(
+            f"""SELECT * FROM applications
+               WHERE lower(company) = lower(?) AND archived = 0
+               AND stage NOT IN ({terminal_ph})
+               ORDER BY applied_date ASC, id ASC LIMIT 1""",
+            (company, *terminal),
+        ).fetchone()
+        return dict(row) if row else None
+
+
 def list_applications(stage: Optional[str] = None, company: Optional[str] = None,
                       source: Optional[str] = None) -> List[dict]:
     query = "SELECT * FROM applications WHERE archived = 0"
@@ -299,6 +325,138 @@ def insert_stage_event(application_id: int, stage: str, event_type: str,
         )
 
 
+def delete_event(event_id: int) -> bool:
+    """Delete a stage_event and recalculate the parent application's stage."""
+    from backend.models import STAGE_RANK, TERMINAL_STAGES
+
+    def _best_stage(stages):
+        def priority(s):
+            return (1, 0) if s in TERMINAL_STAGES else (0, STAGE_RANK.get(s, 0))
+        return max(stages, key=priority)
+
+    with get_db() as conn:
+        event = conn.execute(
+            "SELECT * FROM stage_events WHERE id = ?", (event_id,)
+        ).fetchone()
+        if not event:
+            return False
+
+        app_id = event["application_id"]
+        conn.execute("DELETE FROM stage_events WHERE id = ?", (event_id,))
+
+        remaining = [
+            r["stage"] for r in conn.execute(
+                "SELECT stage FROM stage_events WHERE application_id = ?", (app_id,)
+            ).fetchall()
+        ]
+        if remaining:
+            conn.execute(
+                "UPDATE applications SET stage = ?, last_updated = ? WHERE id = ?",
+                (_best_stage(remaining), datetime.utcnow().isoformat(), app_id),
+            )
+        return True
+
+
+def update_event_stage(event_id: int, stage: str) -> Optional[dict]:
+    """Update a stage_event's stage and recalculate the parent application's stage."""
+    from backend.models import STAGE_RANK, TERMINAL_STAGES
+
+    def _best_stage(stages):
+        def priority(s):
+            return (1, 0) if s in TERMINAL_STAGES else (0, STAGE_RANK.get(s, 0))
+        return max(stages, key=priority)
+
+    with get_db() as conn:
+        event = conn.execute(
+            "SELECT * FROM stage_events WHERE id = ?", (event_id,)
+        ).fetchone()
+        if not event:
+            return None
+
+        conn.execute(
+            "UPDATE stage_events SET stage = ? WHERE id = ?",
+            (stage, event_id),
+        )
+
+        # Recalculate application stage from all its events
+        all_stages = [
+            r["stage"] for r in conn.execute(
+                "SELECT stage FROM stage_events WHERE application_id = ?",
+                (event["application_id"],),
+            ).fetchall()
+        ]
+        if all_stages:
+            best = _best_stage(all_stages)
+            conn.execute(
+                "UPDATE applications SET stage = ?, last_updated = ? WHERE id = ?",
+                (best, datetime.utcnow().isoformat(), event["application_id"]),
+            )
+
+        row = conn.execute(
+            "SELECT * FROM stage_events WHERE id = ?", (event_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def reassign_event(event_id: int, target_app_id: int) -> Optional[dict]:
+    """Move a stage_event to a different application and recalculate both apps' stages."""
+    from backend.models import STAGE_RANK, TERMINAL_STAGES
+
+    def _best_stage(stages):
+        def priority(s):
+            return (1, 0) if s in TERMINAL_STAGES else (0, STAGE_RANK.get(s, 0))
+        return max(stages, key=priority)
+
+    with get_db() as conn:
+        event = conn.execute(
+            "SELECT * FROM stage_events WHERE id = ?", (event_id,)
+        ).fetchone()
+        if not event:
+            return None
+
+        source_app_id = event["application_id"]
+
+        target_app = conn.execute(
+            "SELECT id FROM applications WHERE id = ? AND archived = 0", (target_app_id,)
+        ).fetchone()
+        if not target_app:
+            return None
+
+        conn.execute(
+            "UPDATE stage_events SET application_id = ? WHERE id = ?",
+            (target_app_id, event_id),
+        )
+
+        # Recalculate source app stage from its remaining events
+        if source_app_id != target_app_id:
+            src_stages = [
+                r["stage"] for r in conn.execute(
+                    "SELECT stage FROM stage_events WHERE application_id = ?",
+                    (source_app_id,),
+                ).fetchall()
+            ]
+            if src_stages:
+                conn.execute(
+                    "UPDATE applications SET stage = ?, last_updated = ? WHERE id = ?",
+                    (_best_stage(src_stages), datetime.utcnow().isoformat(), source_app_id),
+                )
+
+        # Recalculate target app stage
+        tgt_stages = [
+            r["stage"] for r in conn.execute(
+                "SELECT stage FROM stage_events WHERE application_id = ?",
+                (target_app_id,),
+            ).fetchall()
+        ]
+        if tgt_stages:
+            conn.execute(
+                "UPDATE applications SET stage = ?, last_updated = ? WHERE id = ?",
+                (_best_stage(tgt_stages), datetime.utcnow().isoformat(), target_app_id),
+            )
+
+        return {"event_id": event_id, "application_id": target_app_id}
+
+
 # ── Stats ──────────────────────────────────────────────────────────────────────
 
 def get_stats() -> dict:
@@ -385,15 +543,15 @@ def get_stats() -> dict:
 
     active = total - counts.get("rejected", 0) - counts.get("declined_offer", 0) - counts.get("ghosted", 0)
 
-    def rate(stage):
-        return round(counts.get(stage, 0) / total * 100, 1) if total else 0
+    def rate(stage, decimals=1):
+        return round(counts.get(stage, 0) / total * 100, decimals) if total else 0
 
     return {
         "total": total,
         "active": active,
         "phone_screen_rate": rate("phone_screen"),
         "interview_rate": rate("interview"),
-        "offer_rate": rate("offer"),
+        "offer_rate": rate("offer", decimals=2),
         "rejection_rate": rate("rejected"),
         "screen_to_interview_rate": screen_to_interview_rate,
         "referral_interview_rate": referral_interview_rate,

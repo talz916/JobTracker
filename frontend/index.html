@@ -221,13 +221,28 @@
 
     <!-- Timeline -->
     <div class="timeline">
-      <h4>Stage History</h4>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+        <h4 style="margin:0">Stage History</h4>
+        <button class="btn btn-secondary" id="add-event-btn" style="padding:3px 10px;font-size:12px">+ Add Event</button>
+      </div>
+      <div id="add-event-form" style="display:none;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:12px">
+        <div style="display:flex;gap:8px;margin-bottom:8px">
+          <select class="filter-select" id="add-event-stage" style="flex:1"></select>
+          <input type="date" class="search-input" id="add-event-date" style="width:140px" />
+        </div>
+        <div style="display:flex;gap:8px">
+          <input type="text" class="search-input" id="add-event-notes" placeholder="Note (e.g. recruiter called)" style="flex:1" />
+          <button class="btn btn-primary" id="add-event-save" style="padding:4px 12px">Save</button>
+          <button class="btn btn-secondary" id="add-event-cancel" style="padding:4px 12px">Cancel</button>
+        </div>
+      </div>
       <div id="timeline-list"></div>
     </div>
 
   </div>
 
   <div class="drawer-actions">
+    <button class="btn btn-secondary" id="drawer-split-btn" title="Track a different role at this company">Split Position</button>
     <button class="btn btn-secondary" id="drawer-edit-btn">Edit</button>
     <button class="btn btn-danger" id="drawer-delete-btn">Delete</button>
   </div>
@@ -303,6 +318,41 @@
     <div class="modal-actions">
       <button class="btn btn-secondary" id="merge-cancel">Cancel</button>
       <button class="btn btn-danger" id="merge-confirm">Merge &amp; Delete Duplicates</button>
+    </div>
+  </div>
+</div>
+
+<!-- Split Position modal -->
+<div class="modal-overlay" id="split-modal-overlay">
+  <div class="modal">
+    <h3>Split into New Position</h3>
+    <p style="color:var(--muted);font-size:13px;margin-bottom:16px">
+      Creates a separate tracking record for a different role at this company.
+      You can then reassign emails from the timeline to the correct position.
+    </p>
+    <div class="form-group">
+      <label>Company</label>
+      <input type="text" id="split-company" readonly style="opacity:0.6;cursor:default" />
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Role *</label>
+        <input type="text" id="split-role" placeholder="e.g. Senior Engineer" />
+      </div>
+      <div class="form-group">
+        <label>Stage</label>
+        <select id="split-stage" class="filter-select">
+          <!-- populated by JS -->
+        </select>
+      </div>
+    </div>
+    <div class="form-group">
+      <label>Date Applied</label>
+      <input type="date" id="split-date" />
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" id="split-cancel">Cancel</button>
+      <button class="btn btn-primary" id="split-confirm">Create Position</button>
     </div>
   </div>
 </div>

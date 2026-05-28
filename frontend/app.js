@@ -43,8 +43,8 @@ let state = {
   editingAppId: null,
   filterStage: '',
   filterCompany: '',
-  sortCol: 'last_updated',
-  sortDir: 'desc',
+  sortCol: 'stage',
+  sortDir: 'asc',
 };
 
 // ── Init ──────────────────────────────────────────────────────────────────────
@@ -255,19 +255,32 @@ function renderTable() {
 
   const sorted = sortedApps();
 
-  tbody.innerHTML = sorted.map(app => `
+  // Count how many positions each company has
+  const companyCounts = {};
+  sorted.forEach(a => {
+    const key = a.company.toLowerCase();
+    companyCounts[key] = (companyCounts[key] || 0) + 1;
+  });
+
+  tbody.innerHTML = sorted.map(app => {
+    const isMulti = companyCounts[app.company.toLowerCase()] > 1;
+    const companyCell = isMulti
+      ? `<strong>${esc(app.company)}</strong> <span class="multi-pos-badge" title="${companyCounts[app.company.toLowerCase()]} positions tracked">${companyCounts[app.company.toLowerCase()]}</span>`
+      : `<strong>${esc(app.company)}</strong>`;
+    return `
     <tr data-id="${app.id}" class="${_selectedIds.has(app.id) ? 'row-selected' : ''}">
       <td onclick="event.stopPropagation()">
         <input type="checkbox" class="row-cb" data-id="${app.id}" ${_selectedIds.has(app.id) ? 'checked' : ''}>
       </td>
-      <td><strong>${esc(app.company)}</strong></td>
+      <td>${companyCell}</td>
       <td>${esc(app.role || '—')}</td>
       <td><span class="badge badge-${app.stage}">${STAGE_LABELS[app.stage] || app.stage}</span></td>
       <td>${fmtDate(app.applied_date)}</td>
       <td>${fmtDate(app.last_updated)}</td>
       <td style="color:var(--muted);text-transform:capitalize">${app.source}</td>
     </tr>
-  `).join('');
+  `;
+  }).join('');
 
   tbody.querySelectorAll('tr').forEach(tr => {
     tr.addEventListener('click', () => openDrawer(parseInt(tr.dataset.id)));
@@ -397,6 +410,11 @@ async function openDrawer(appId) {
   if (!app) return;
   state.currentApp = app;
 
+  // Find other tracked positions at the same company
+  state.siblingApps = state.apps.filter(
+    a => a.company.toLowerCase() === app.company.toLowerCase() && a.id !== appId
+  );
+
   document.getElementById('drawer-company').textContent = app.company;
   document.getElementById('drawer-role').textContent = app.role || '—';
   document.getElementById('drawer-stage-badge').className = `badge badge-${app.stage}`;
@@ -432,16 +450,113 @@ async function loadTimeline(appId) {
     container.innerHTML = '<p style="color:var(--muted);font-size:12px">No events recorded yet.</p>';
     return;
   }
+
+  const siblings = state.siblingApps || [];
+
+  const stageOptions = Object.entries(STAGE_LABELS)
+    .map(([v, l]) => `<option value="${v}">${l}</option>`)
+    .join('');
+
   container.innerHTML = events.map(ev => `
     <div class="timeline-item">
       <div class="tl-content">
-        <div class="tl-stage">${STAGE_LABELS[ev.stage] || ev.stage}</div>
+        <div class="tl-stage-row" style="display:flex;align-items:center;gap:6px">
+          <select class="stage-edit-select filter-select" data-event-id="${ev.id}" title="Change stage classification" style="font-size:11px;padding:2px 6px;height:auto;font-weight:600;flex:1">
+            ${Object.entries(STAGE_LABELS).map(([v, l]) => `<option value="${v}" ${v === ev.stage ? 'selected' : ''}>${l}</option>`).join('')}
+          </select>
+          <button class="event-delete-btn btn btn-ghost" data-event-id="${ev.id}" title="Delete this event" style="padding:1px 6px;font-size:12px;color:var(--danger);line-height:1">×</button>
+        </div>
         <div class="tl-subject">${esc(ev.subject || '')}</div>
         <div class="tl-date">${fmtDateTime(ev.event_date || ev.created_at)}</div>
         <div class="tl-type">${ev.event_type}</div>
+        ${siblings.length > 0 ? `
+          <div style="margin-top:4px">
+            <select class="reassign-select filter-select" data-event-id="${ev.id}" style="font-size:11px;padding:2px 6px;height:auto">
+              <option value="">Move to position…</option>
+              ${siblings.map(s => `<option value="${s.id}">${esc(s.role || s.company)} [${STAGE_LABELS[s.stage] || s.stage}]</option>`).join('')}
+            </select>
+          </div>
+        ` : ''}
       </div>
     </div>
   `).join('');
+
+  container.querySelectorAll('.stage-edit-select').forEach(sel => {
+    sel.addEventListener('change', async () => {
+      const eventId = parseInt(sel.dataset.eventId);
+      const newStage = sel.value;
+      const res = await fetch(`/api/events/${eventId}/stage`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ stage: newStage }),
+      });
+      if (!res.ok) { toast('Stage update failed', 'error'); return; }
+
+      toast(`Event reclassified as "${STAGE_LABELS[newStage]}"`, 'success');
+      await Promise.all([loadApps(), loadStats()]);
+      renderTable(); renderStats(); renderFunnel(); renderWeekly();
+
+      const refreshed = state.apps.find(a => a.id === appId);
+      if (refreshed) {
+        state.currentApp = refreshed;
+        document.getElementById('drawer-stage-badge').className = `badge badge-${refreshed.stage}`;
+        document.getElementById('drawer-stage-badge').textContent = STAGE_LABELS[refreshed.stage] || refreshed.stage;
+        const moveSelect = document.getElementById('move-stage-select');
+        if (moveSelect) moveSelect.value = refreshed.stage;
+      }
+    });
+  });
+
+  container.querySelectorAll('.event-delete-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      if (!confirm('Delete this event from the history?')) return;
+      const eventId = parseInt(btn.dataset.eventId);
+      const res = await fetch(`/api/events/${eventId}`, { method: 'DELETE' });
+      if (!res.ok) { toast('Delete failed', 'error'); return; }
+      toast('Event deleted', 'success');
+      await Promise.all([loadApps(), loadStats()]);
+      renderTable(); renderStats(); renderFunnel(); renderWeekly();
+      const refreshed = state.apps.find(a => a.id === appId);
+      if (refreshed) {
+        state.currentApp = refreshed;
+        document.getElementById('drawer-stage-badge').className = `badge badge-${refreshed.stage}`;
+        document.getElementById('drawer-stage-badge').textContent = STAGE_LABELS[refreshed.stage] || refreshed.stage;
+      }
+      await loadTimeline(appId);
+    });
+  });
+
+  container.querySelectorAll('.reassign-select').forEach(sel => {
+    sel.addEventListener('change', async () => {
+      const eventId = parseInt(sel.dataset.eventId);
+      const targetAppId = parseInt(sel.value);
+      if (!targetAppId) return;
+
+      const target = state.siblingApps.find(s => s.id === targetAppId);
+      const res = await fetch(`/api/events/${eventId}/reassign`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ application_id: targetAppId }),
+      });
+      if (!res.ok) { toast('Reassign failed', 'error'); sel.value = ''; return; }
+
+      toast(`Event moved to "${target?.role || target?.company || 'other position'}"`, 'success');
+      await Promise.all([loadApps(), loadStats()]);
+      renderTable(); renderStats(); renderFunnel(); renderWeekly();
+
+      // Refresh the drawer with updated data
+      state.siblingApps = state.apps.filter(
+        a => a.company.toLowerCase() === state.currentApp.company.toLowerCase() && a.id !== appId
+      );
+      const refreshed = state.apps.find(a => a.id === appId);
+      if (refreshed) {
+        state.currentApp = refreshed;
+        document.getElementById('drawer-stage-badge').className = `badge badge-${refreshed.stage}`;
+        document.getElementById('drawer-stage-badge').textContent = STAGE_LABELS[refreshed.stage] || refreshed.stage;
+      }
+      await loadTimeline(appId);
+    });
+  });
 }
 
 function closeDrawer() {
@@ -452,6 +567,61 @@ function closeDrawer() {
 
 document.getElementById('overlay')?.addEventListener('click', closeDrawer);
 document.getElementById('drawer-close')?.addEventListener('click', closeDrawer);
+
+// Populate add-event stage select
+const addEventStageSelect = document.getElementById('add-event-stage');
+if (addEventStageSelect) {
+  Object.entries(STAGE_LABELS).forEach(([value, label]) => {
+    const opt = document.createElement('option');
+    opt.value = value; opt.textContent = label;
+    addEventStageSelect.appendChild(opt);
+  });
+}
+
+document.getElementById('add-event-btn')?.addEventListener('click', () => {
+  const form = document.getElementById('add-event-form');
+  form.style.display = form.style.display === 'none' ? 'block' : 'none';
+});
+
+document.getElementById('add-event-cancel')?.addEventListener('click', () => {
+  document.getElementById('add-event-form').style.display = 'none';
+  document.getElementById('add-event-notes').value = '';
+  document.getElementById('add-event-date').value = '';
+});
+
+document.getElementById('add-event-save')?.addEventListener('click', async () => {
+  const app = state.currentApp;
+  if (!app) return;
+  const stage = document.getElementById('add-event-stage').value;
+  const notes = document.getElementById('add-event-notes').value.trim();
+  const dateVal = document.getElementById('add-event-date').value;
+  const body = { stage, notes: notes || null };
+  if (dateVal) body.event_date = dateVal + 'T12:00:00';
+
+  const res = await fetch(`/api/applications/${app.id}/log-event`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) { toast('Failed to add event', 'error'); return; }
+
+  document.getElementById('add-event-form').style.display = 'none';
+  document.getElementById('add-event-notes').value = '';
+  document.getElementById('add-event-date').value = '';
+
+  toast(`Logged: ${STAGE_LABELS[stage]}`, 'success');
+  await Promise.all([loadApps(), loadStats()]);
+  renderTable(); renderStats(); renderFunnel(); renderWeekly();
+  const refreshed = state.apps.find(a => a.id === app.id);
+  if (refreshed) {
+    state.currentApp = refreshed;
+    document.getElementById('drawer-stage-badge').className = `badge badge-${refreshed.stage}`;
+    document.getElementById('drawer-stage-badge').textContent = STAGE_LABELS[refreshed.stage] || refreshed.stage;
+    const moveSelect = document.getElementById('move-stage-select');
+    if (moveSelect) moveSelect.value = refreshed.stage;
+  }
+  await loadTimeline(app.id);
+});
 
 document.getElementById('move-stage-btn')?.addEventListener('click', async () => {
   const app = state.currentApp;
@@ -502,6 +672,67 @@ document.getElementById('drawer-refer-btn')?.addEventListener('click', async () 
   await loadApps();
   renderTable();
 });
+
+document.getElementById('drawer-split-btn')?.addEventListener('click', () => {
+  if (!state.currentApp) return;
+  document.getElementById('split-company').value = state.currentApp.company;
+  document.getElementById('split-role').value = '';
+  document.getElementById('split-date').value = '';
+  document.getElementById('split-stage').value = 'applied';
+  document.getElementById('split-modal-overlay').classList.add('open');
+});
+
+document.getElementById('split-cancel')?.addEventListener('click', () => {
+  document.getElementById('split-modal-overlay').classList.remove('open');
+});
+
+document.getElementById('split-modal-overlay')?.addEventListener('click', e => {
+  if (e.target === e.currentTarget) document.getElementById('split-modal-overlay').classList.remove('open');
+});
+
+document.getElementById('split-confirm')?.addEventListener('click', async () => {
+  const role = document.getElementById('split-role').value.trim();
+  if (!role) { toast('Role is required', 'error'); return; }
+
+  const body = {
+    company: document.getElementById('split-company').value,
+    role,
+    stage: document.getElementById('split-stage').value,
+    applied_date: document.getElementById('split-date').value || null,
+    source: 'manual',
+  };
+
+  const res = await fetch('/api/applications', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) { toast('Failed to create position', 'error'); return; }
+
+  document.getElementById('split-modal-overlay').classList.remove('open');
+  toast(`New position "${role}" created — open it to reassign emails`, 'success');
+  await Promise.all([loadApps(), loadStats()]);
+  renderTable(); renderStats(); renderFunnel(); renderWeekly();
+
+  // Refresh siblings in current drawer
+  if (state.currentApp) {
+    state.siblingApps = state.apps.filter(
+      a => a.company.toLowerCase() === state.currentApp.company.toLowerCase() && a.id !== state.currentApp.id
+    );
+    await loadTimeline(state.currentApp.id);
+  }
+});
+
+// Populate split-stage select
+const splitStageSelect = document.getElementById('split-stage');
+if (splitStageSelect) {
+  Object.entries(STAGE_LABELS).forEach(([value, label]) => {
+    const opt = document.createElement('option');
+    opt.value = value;
+    opt.textContent = label;
+    splitStageSelect.appendChild(opt);
+  });
+}
 
 document.getElementById('drawer-edit-btn')?.addEventListener('click', () => {
   if (!state.currentApp) return;
