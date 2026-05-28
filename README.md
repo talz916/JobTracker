@@ -26,7 +26,7 @@ A job search is a serious amount of work. JobTracker makes sure that work is mea
 
 ```bash
 git clone <your-fork>
-cd JobHunter
+cd JobTracker
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -44,13 +44,13 @@ cp .env.example .env
 ### 3. Set up Google OAuth credentials
 
 1. Go to [Google Cloud Console](https://console.cloud.google.com/)
-2. Create a new project (e.g. "JobHunter")
+2. Create a new project (e.g. "JobTracker")
 3. Go to **APIs & Services → Library** and enable:
    - **Gmail API**
    - **Google Calendar API**
 4. Go to **APIs & Services → OAuth consent screen**
    - Choose **External**
-   - Fill in app name (e.g. "JobHunter")
+   - Fill in app name (e.g. "JobTracker")
    - Add your Gmail address as a **Test user**
 5. Go to **APIs & Services → Credentials → Create Credentials → OAuth client ID**
    - Application type: **Desktop app**
