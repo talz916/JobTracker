@@ -8,6 +8,16 @@
 - **Shows a funnel dashboard** with conversion rates at each stage (e.g. 100 applied → 40% phone screen → 20% interview → 5% offer)
 - **Manual entry and stage movement** for anything without an email trail (referral applications, recruiter phone calls, verbal decisions)
 
+### What it replaces — and why that matters
+
+Most job seekers manage their search in a spreadsheet. That means opening Gmail, hunting down the confirmation email, copying the company name and role title into a row, and repeating that for every single application. It's tedious enough that most people either fall behind or give up on tracking entirely — which means the effort they're putting in becomes invisible, even to themselves.
+
+JobTracker eliminates that loop. Your applications are captured automatically, stages update as emails arrive, and every sync click adds to a complete record of your search without you touching a spreadsheet.
+
+The bigger payoff is what that record shows you. Without it, your sense of how you're doing is just a feeling — *"I think I'm getting callbacks maybe 30% of the time?"*. With JobTracker, you get exact conversion rates at every stage: how many applications became phone screens, how many phone screens became interviews, where you're consistently dropping off. That's not just satisfying to see — it tells you where to focus, whether that's applying to more roles, tightening your resume, or improving how you perform at a specific stage.
+
+A job search is a serious amount of work. JobTracker makes sure that work is measured, visible, and actionable.
+
 ---
 
 ## Setup
@@ -140,6 +150,24 @@ All data stays on your machine. The app uses:
 - **SQLite** — stored locally at `jobhunter.db`
 
 Nothing is sent to any other third party.
+
+---
+
+## To Do
+
+Features planned or open for contributions. PRs welcome!
+
+- **Edit stage history** — Allow users to delete or correct individual entries in an application's stage timeline. Useful when a mis-classified email creates a phantom stage or you want to clean up duplicate events. Each history entry would get an edit/delete action in the detail drawer.
+
+- **CI/CD pipeline** — GitHub Actions workflow that lints the Python backend (ruff/flake8), validates the frontend (eslint or basic HTML checks), and runs tests on every push and pull request. Keeps the main branch green and makes contributions safer to merge.
+
+- **Unit testing** — Test suite covering the classifier logic, database CRUD helpers, and stage-transition rules. Priority targets: `classifier.py` (mock the Anthropic API, assert correct stage mapping from sample email text) and `models.py` (stage ordering, ghosted-detection logic).
+
+- **View archive** — A dedicated archive tab or modal listing applications that were manually archived or auto-closed. Should support restoring an entry back to active, and filtering/searching by company or role. Useful for reviewing past cycles before a new job search.
+
+- **AI career coach** — An integrated coaching layer trained on your personal job search data. You provide your CV, cover letters, and any other context (target roles, preferred industries, salary expectations), and the coach analyses your funnel stats to surface specific, actionable guidance: why you might be dropping off after phone screens, which types of roles your profile lands interviews for most consistently, and where your application materials may be underselling you. Goes beyond raw numbers by connecting your conversion rates to the actual content you're submitting — so instead of "your interview rate is low", you get "your CV doesn't reflect the seniority of the roles you're targeting." The coach could also suggest which roles to prioritise applying to based on your historical hit rate in similar positions or industries.
+
+- **Industry performance analytics** — Extend the funnel dashboard to break down conversion rates by industry or role type (e.g. "You get a phone screen 60% of the time in fintech vs 30% in enterprise SaaS"). Requires tagging each application with an industry, either manually or inferred by Claude during classification.
 
 ---
 
