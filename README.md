@@ -4,7 +4,7 @@
 - **Auto-detects emails** in your Gmail related to job applications, recruiter outreach, interview scheduling, rejections, and offers
 - **Reads your calendar** for interview events and links them to the right application
 - **Classifies everything with Claude AI** so it works across all HR platforms and email phrasings
-- **Tracks stages**: Applied → Recruiter Outreach → Phone Screen → Interview → Technical Assessment → HR Interview → Offer / Rejected / Declined / Ghosted
+- **Tracks stages**: Applied → Phone Screen → Interview → Technical Assessment → HR Interview → Offer / Rejected / Declined / Ghosted
 - **Shows a funnel dashboard** with conversion rates at each stage (e.g. 100 applied → 40% phone screen → 20% interview → 5% offer)
 - **Manual entry and stage movement** for anything without an email trail (referral applications, recruiter phone calls, verbal decisions)
 
@@ -72,7 +72,7 @@ Click the ⚙ gear icon in the top right to configure:
 | Setting | Default | Description |
 |---|---|---|
 | **Gmail Label** | *(empty)* | If you label job-related emails in Gmail (e.g. "Job Hunt"), enter the label name here. Those emails are always synced first. Leave blank to use keyword search only. |
-| **Ghosted after** | 30 days | Applications stuck in "Applied" or "Recruiter Outreach" with no update are auto-flagged as ghosted after this many days. |
+| **Ghosted after** | 30 days | Applications stuck in "Applied" with no update are auto-flagged as ghosted after this many days. |
 | **Min. AI confidence** | 0.6 | Claude's minimum confidence score to accept an email classification. Lower = more emails caught but more false positives. |
 
 ---
@@ -101,7 +101,6 @@ The detail drawer shows a full chronological timeline of every detected email, c
 | Stage | How it's detected |
 |---|---|
 | Applied | Application confirmation/acknowledgment email |
-| Recruiter Outreach | Inbound recruiter contact |
 | Phone Screen | Calendar event or email scheduling an initial call |
 | Interview | Calendar event or email for first-round interview |
 | Technical Assessment | Home assignment or technical interview (after first interview) |
