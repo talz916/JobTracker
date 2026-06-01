@@ -549,8 +549,8 @@ def get_stats() -> dict:
     return {
         "total": total,
         "active": active,
-        "phone_screen_rate": rate("phone_screen"),
-        "interview_rate": rate("interview"),
+        "phone_screen_rate": round(reached.get("phone_screen", 0) / total * 100, 1) if total else 0,
+        "interview_rate": round(reached.get("interview", 0) / total * 100, 1) if total else 0,
         "offer_rate": round(reached.get("offer", 0) / total * 100, 2) if total else 0,
         "rejection_rate": rate("rejected"),
         "screen_to_interview_rate": screen_to_interview_rate,

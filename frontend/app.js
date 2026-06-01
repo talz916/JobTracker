@@ -112,6 +112,7 @@ function renderStats() {
   if (!s) return;
   document.getElementById('stat-total').textContent = s.total;
   document.getElementById('stat-active').textContent = s.active;
+  document.getElementById('stat-phone-screen').textContent = s.phone_screen_rate + '%';
   document.getElementById('stat-interview').textContent = s.interview_rate + '%';
   document.getElementById('stat-offer').textContent = s.offer_rate + '%';
   document.getElementById('stat-screen').textContent =
