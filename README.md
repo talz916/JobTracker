@@ -157,8 +157,6 @@ Nothing is sent to any other third party.
 
 Features planned or open for contributions. PRs welcome!
 
-- **Edit stage history** — Allow users to delete or correct individual entries in an application's stage timeline. Useful when a mis-classified email creates a phantom stage or you want to clean up duplicate events. Each history entry would get an edit/delete action in the detail drawer.
-
 - **CI/CD pipeline** — GitHub Actions workflow that lints the Python backend (ruff/flake8), validates the frontend (eslint or basic HTML checks), and runs tests on every push and pull request. Keeps the main branch green and makes contributions safer to merge.
 
 - **Unit testing** — Test suite covering the classifier logic, database CRUD helpers, and stage-transition rules. Priority targets: `classifier.py` (mock the Anthropic API, assert correct stage mapping from sample email text) and `models.py` (stage ordering, ghosted-detection logic).
