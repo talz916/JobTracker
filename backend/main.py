@@ -4,7 +4,7 @@ import threading
 from typing import Optional
 from pathlib import Path
 from datetime import datetime
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from dotenv import load_dotenv
@@ -25,6 +25,9 @@ class UpdateEventStageRequest(BaseModel):
     stage: str
 
 load_dotenv(override=True)
+
+# Allow OAuth over http://localhost (oauthlib blocks non-HTTPS by default)
+os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
 
 app = FastAPI(title="JobHunter")
 db.init_db()
@@ -90,6 +93,11 @@ app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
 
 # ── Auth ───────────────────────────────────────────────────────────────────────
 
+# Store the flow between /api/auth/url and /api/auth/callback so the PKCE
+# code_verifier (generated during authorization_url) is available at token exchange.
+_pending_flow = None
+
+
 @app.get("/api/auth/status")
 def auth_status():
     return {
@@ -100,6 +108,7 @@ def auth_status():
 
 @app.get("/api/auth/url")
 def auth_url():
+    global _pending_flow
     if not Path(CREDENTIALS_FILE).exists():
         raise HTTPException(400, "credentials/credentials.json not found.")
     from google_auth_oauthlib.flow import Flow
@@ -108,17 +117,19 @@ def auth_url():
         redirect_uri="http://localhost:8000/api/auth/callback",
     )
     url, _ = flow.authorization_url(access_type="offline", prompt="consent")
+    _pending_flow = flow
     return {"url": url}
 
 
 @app.get("/api/auth/callback")
-def auth_callback(code: str, state: Optional[str] = None):
-    from google_auth_oauthlib.flow import Flow
-    flow = Flow.from_client_secrets_file(
-        CREDENTIALS_FILE, scopes=SCOPES,
-        redirect_uri="http://localhost:8000/api/auth/callback",
-    )
-    flow.fetch_token(code=code)
+def auth_callback(request: Request, code: str, state: Optional[str] = None):
+    global _pending_flow
+    if _pending_flow is None:
+        return FileResponse(FRONTEND_DIR / "index.html")
+    flow = _pending_flow
+    _pending_flow = None
+    # Pass the full callback URL so fetch_token can validate state and use the PKCE verifier
+    flow.fetch_token(authorization_response=str(request.url))
     Path(TOKEN_FILE).parent.mkdir(parents=True, exist_ok=True)
     with open(TOKEN_FILE, "w") as f:
         f.write(flow.credentials.to_json())
@@ -290,6 +301,17 @@ def sync_status():
     return _get_sync_state()
 
 
+def _friendly_error(e: Exception) -> str:
+    msg = str(e)
+    if "invalid_grant" in msg or "Token has been expired or revoked" in msg:
+        return "Google token expired — click 'Connect Google Account' to re-authorize."
+    if "invalid_client" in msg:
+        return "Google OAuth client error — check credentials/credentials.json."
+    if "ANTHROPIC_API_KEY" in msg or "api_key" in msg.lower():
+        return "Anthropic API key missing or invalid — check your .env file."
+    return msg
+
+
 def _run_email_sync(gmail_label: str, min_confidence: float, ghosted_days: int):
     try:
         from backend.email_sync import sync_emails as _sync
@@ -304,7 +326,7 @@ def _run_email_sync(gmail_label: str, min_confidence: float, ghosted_days: int):
         result["ghosted_flagged"] = ghosted
         _update_sync(running=False, message="Done", result=result)
     except Exception as e:
-        _update_sync(running=False, message="Error", error=str(e))
+        _update_sync(running=False, message="Error", error=_friendly_error(e))
 
 
 def _run_calendar_sync(min_confidence: float):
@@ -318,7 +340,7 @@ def _run_calendar_sync(min_confidence: float):
         )
         _update_sync(running=False, message="Done", result=result)
     except Exception as e:
-        _update_sync(running=False, message="Error", error=str(e))
+        _update_sync(running=False, message="Error", error=_friendly_error(e))
 
 
 @app.post("/api/sync/emails")

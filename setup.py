@@ -23,7 +23,8 @@ def main():
             "\nSetup steps:\n"
             "1. Go to https://console.cloud.google.com/\n"
             "2. Create a project → APIs & Services → Enable Gmail API + Google Calendar API\n"
-            "3. OAuth consent screen → External → add your Gmail as a test user\n"
+            "3. OAuth consent screen → External → Audience → set Publishing status to Production\n"
+            "   (Leaving it as Testing means tokens expire every 7 days)\n"
             "4. Credentials → Create OAuth client ID → Desktop app\n"
             "5. Download JSON → save as credentials/credentials.json\n"
         )
@@ -39,7 +40,7 @@ def main():
         f.write(creds.to_json())
 
     print(f"\nSuccess! Token saved to {TOKEN_FILE}")
-    print("You can now start the app: uvicorn backend.main:app --reload --port 8000")
+    print("You can now start the app: uvicorn backend.main:app --port 8000")
 
 
 if __name__ == "__main__":

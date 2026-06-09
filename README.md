@@ -48,10 +48,13 @@ cp .env.example .env
 3. Go to **APIs & Services → Library** and enable:
    - **Gmail API**
    - **Google Calendar API**
-4. Go to **APIs & Services → OAuth consent screen**
+4. Go to **APIs & Services → OAuth consent screen** (now called **Google Auth Platform**)
    - Choose **External**
-   - Fill in app name (e.g. "JobTracker")
-   - Add your Gmail address as a **Test user**
+   - Fill in app name (e.g. "JobTracker") and your email
+   - Click through to **Audience** and set **Publishing status → Production**
+
+   > **Why Production?** Apps left in *Testing* mode have OAuth tokens that expire after 7 days, requiring you to re-authenticate constantly. Setting it to Production gives you a permanent token. Google will show a "this app isn't verified" warning when you sign in — that's expected and safe to click through for a self-hosted personal tool.
+
 5. Go to **APIs & Services → Credentials → Create Credentials → OAuth client ID**
    - Application type: **Desktop app**
    - Download the JSON file
@@ -59,11 +62,9 @@ cp .env.example .env
 
 ### 4. Authenticate
 
-```bash
-python setup.py
-```
+Start the app (step 5 below), then open [http://localhost:8000](http://localhost:8000) and click **Connect Google Account**. Complete the Google sign-in — you'll see a "Google hasn't verified this app" screen, which is normal for self-hosted tools. Click **Continue** to proceed. The token is saved automatically to `credentials/token.json`.
 
-This opens a browser window for the Google OAuth flow. After approving, a token is saved to `credentials/token.json`. You only need to do this once.
+You only need to do this once (or if you revoke access in your Google account settings).
 
 ### 5. Run the app
 
