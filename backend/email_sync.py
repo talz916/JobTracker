@@ -150,7 +150,9 @@ def _process_thread(service, thread_id: str, min_confidence: float) -> Optional[
 
     try:
         from email.utils import parsedate_to_datetime
-        event_date = parsedate_to_datetime(date_str).isoformat() if date_str else None
+        # Normalize to the canonical naive-UTC format: email Date headers
+        # carry arbitrary timezone offsets that break string ordering
+        event_date = db.to_utc_iso(parsedate_to_datetime(date_str)) if date_str else None
     except Exception:
         event_date = None
 
