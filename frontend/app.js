@@ -50,6 +50,11 @@ let state = {
 // ── Init ──────────────────────────────────────────────────────────────────────
 
 async function init() {
+  const params = new URLSearchParams(window.location.search);
+  if (params.has('auth_error')) {
+    toast('Google sign-in failed — please try connecting again', 'error');
+    history.replaceState(null, '', '/');
+  }
   await checkAuth();
   await Promise.all([loadSettings(), loadApps(), loadStats()]);
   renderStats();
