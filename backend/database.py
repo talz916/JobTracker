@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS stage_events (
     event_date DATETIME,
     subject TEXT,
     thread_id TEXT,
+    message_id TEXT,
     calendar_event_id TEXT,
     snippet TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -39,9 +40,6 @@ CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT
 );
-
-CREATE UNIQUE INDEX IF NOT EXISTS idx_thread
-    ON stage_events(thread_id) WHERE thread_id IS NOT NULL;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_cal_event
     ON stage_events(calendar_event_id) WHERE calendar_event_id IS NOT NULL;
@@ -91,6 +89,19 @@ def init_db():
             )
         except Exception:
             pass  # Column already exists
+        # Migrate: track individual messages within a thread so replies
+        # (rejections, interview invites) update the stage. The old index was
+        # unique on thread_id alone, which locked a thread after its first
+        # message forever.
+        try:
+            conn.execute("ALTER TABLE stage_events ADD COLUMN message_id TEXT")
+        except Exception:
+            pass  # Column already exists
+        conn.execute("DROP INDEX IF EXISTS idx_thread")
+        conn.execute(
+            """CREATE UNIQUE INDEX IF NOT EXISTS idx_thread_msg
+               ON stage_events(thread_id, message_id) WHERE thread_id IS NOT NULL"""
+        )
 
 
 # ── Settings ──────────────────────────────────────────────────────────────────
@@ -301,6 +312,26 @@ def thread_exists(thread_id: str) -> bool:
     return row is not None
 
 
+def thread_message_ids(thread_id: str) -> set:
+    """All Gmail message ids already recorded for a thread. May contain None
+    for rows written before message-level tracking existed."""
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT message_id FROM stage_events WHERE thread_id = ?", (thread_id,)
+        ).fetchall()
+    return {r["message_id"] for r in rows}
+
+
+def backfill_thread_message_id(thread_id: str, message_id: str):
+    """Stamp pre-migration rows (message_id NULL) with the thread's first
+    message id so the thread isn't endlessly re-classified after upgrade."""
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE stage_events SET message_id = ? WHERE thread_id = ? AND message_id IS NULL",
+            (message_id, thread_id),
+        )
+
+
 def cal_event_exists(cal_event_id: str) -> bool:
     with get_db() as conn:
         row = conn.execute(
@@ -313,15 +344,16 @@ def insert_stage_event(application_id: int, stage: str, event_type: str,
                         event_date=None, subject: Optional[str] = None,
                         thread_id: Optional[str] = None,
                         calendar_event_id: Optional[str] = None,
-                        snippet: Optional[str] = None):
+                        snippet: Optional[str] = None,
+                        message_id: Optional[str] = None):
     with get_db() as conn:
         conn.execute(
             """INSERT OR IGNORE INTO stage_events
                (application_id, stage, event_type, event_date, subject,
-                thread_id, calendar_event_id, snippet)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                thread_id, message_id, calendar_event_id, snippet)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (application_id, stage, event_type, event_date, subject,
-             thread_id, calendar_event_id, snippet),
+             thread_id, message_id, calendar_event_id, snippet),
         )
 
 
