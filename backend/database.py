@@ -53,6 +53,11 @@ DEFAULT_SETTINGS = {
     "min_confidence": "0.6",
 }
 
+# Internal record that caches threads/events classified as not job-related.
+# Hidden from the UI; may be deleted by reset_email_cache, so callers must
+# always go through get_or_create_placeholder() instead of caching its id.
+PLACEHOLDER_COMPANY = "__skipped__"
+
 
 @contextmanager
 def get_db():
@@ -280,6 +285,25 @@ def merge_applications(keep_id: int, merge_ids: List[int]) -> Optional[dict]:
 
         row = conn.execute("SELECT * FROM applications WHERE id = ?", (keep_id,)).fetchone()
         return dict(row) if row else None
+
+
+def get_or_create_placeholder() -> int:
+    """Return the id of the '__skipped__' placeholder application, creating it
+    if missing. Looked up on every call: reset_email_cache can delete the
+    placeholder, so a cached id would point at a dead row and every subsequent
+    stage-event insert would fail its foreign-key check."""
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT id FROM applications WHERE company = ?", (PLACEHOLDER_COMPANY,)
+        ).fetchone()
+        if row:
+            return row["id"]
+    app = create_application(
+        company=PLACEHOLDER_COMPANY, role=None, stage="other",
+        applied_date=None, source="auto",
+        notes="Internal placeholder for non-job-related items", job_url=None,
+    )
+    return app["id"]
 
 
 # ── Stage Events ───────────────────────────────────────────────────────────────

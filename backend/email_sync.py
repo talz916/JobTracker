@@ -139,7 +139,7 @@ def _process_thread(service, thread_id: str, min_confidence: float) -> Optional[
 
     if not result.is_job_related or result.confidence < min_confidence:
         db.insert_stage_event(
-            application_id=_get_or_create_placeholder(),
+            application_id=db.get_or_create_placeholder(),
             stage="other",
             event_type="email",
             thread_id=thread_id,
@@ -189,28 +189,6 @@ def _process_thread(service, thread_id: str, min_confidence: float) -> Optional[
         snippet=body[:200],
     )
     return {"company": company, "stage": result.stage, "thread_id": thread_id}
-
-
-_placeholder_id: Optional[int] = None
-
-
-def _get_or_create_placeholder() -> int:
-    global _placeholder_id
-    if _placeholder_id is not None:
-        return _placeholder_id
-    app = db.find_application_by_company("__skipped__")
-    if app is None:
-        app = db.create_application(
-            company="__skipped__",
-            role=None,
-            stage="other",
-            applied_date=None,
-            source="auto",
-            notes="Internal placeholder for non-job-related threads",
-            job_url=None,
-        )
-    _placeholder_id = app["id"]
-    return _placeholder_id
 
 
 def sync_emails(gmail_label: str = "", min_confidence: float = 0.6,

@@ -1,5 +1,4 @@
 import os
-from typing import Optional
 from datetime import datetime, timedelta, timezone
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -76,7 +75,7 @@ def sync_calendar(min_confidence: float = 0.6, progress_cb=None) -> dict:
 
             if not classification.is_job_related or classification.confidence < min_confidence:
                 db.insert_stage_event(
-                    application_id=_get_or_create_placeholder(),
+                    application_id=db.get_or_create_placeholder(),
                     stage="other",
                     event_type="calendar",
                     calendar_event_id=cal_event_id,
@@ -116,25 +115,3 @@ def sync_calendar(min_confidence: float = 0.6, progress_cb=None) -> dict:
             break
 
     return {"events_checked": processed, "applications_updated": added}
-
-
-_placeholder_id: Optional[int] = None
-
-
-def _get_or_create_placeholder() -> int:
-    global _placeholder_id
-    if _placeholder_id is not None:
-        return _placeholder_id
-    app = db.find_application_by_company("__skipped__")
-    if app is None:
-        app = db.create_application(
-            company="__skipped__",
-            role=None,
-            stage="other",
-            applied_date=None,
-            source="auto",
-            notes="Internal placeholder for non-job-related events",
-            job_url=None,
-        )
-    _placeholder_id = app["id"]
-    return _placeholder_id
