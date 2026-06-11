@@ -82,6 +82,21 @@ def _get_sync_state() -> dict:
         return dict(_sync_state)
 
 
+def _try_start_sync(type_: str) -> bool:
+    """Atomically claim the sync slot. Checking 'running' and then setting it
+    in two separate steps lets two concurrent requests both start a sync,
+    doubling Gmail/Anthropic usage — so the test-and-set happens under one
+    lock acquisition."""
+    with _sync_lock:
+        if _sync_state["running"]:
+            return False
+        _sync_state.update(
+            running=True, type=type_, processed=0, total=0,
+            updated=0, message="Starting…", error=None, result=None,
+        )
+        return True
+
+
 # ── Static files ───────────────────────────────────────────────────────────────
 
 @app.get("/")
@@ -347,14 +362,9 @@ def _run_calendar_sync(min_confidence: float):
 def sync_emails():
     if not Path(TOKEN_FILE).exists():
         raise HTTPException(401, "Not authenticated.")
-    state = _get_sync_state()
-    if state["running"]:
-        raise HTTPException(409, "A sync is already running.")
     settings = db.get_settings()
-    _update_sync(
-        running=True, type_="emails", processed=0, total=0,
-        updated=0, message="Starting…", error=None, result=None,
-    )
+    if not _try_start_sync("emails"):
+        raise HTTPException(409, "A sync is already running.")
     t = threading.Thread(
         target=_run_email_sync,
         args=(
@@ -372,14 +382,9 @@ def sync_emails():
 def sync_calendar():
     if not Path(TOKEN_FILE).exists():
         raise HTTPException(401, "Not authenticated.")
-    state = _get_sync_state()
-    if state["running"]:
-        raise HTTPException(409, "A sync is already running.")
     settings = db.get_settings()
-    _update_sync(
-        running=True, type_="calendar", processed=0, total=0,
-        updated=0, message="Starting…", error=None, result=None,
-    )
+    if not _try_start_sync("calendar"):
+        raise HTTPException(409, "A sync is already running.")
     t = threading.Thread(
         target=_run_calendar_sync,
         args=(float(settings.get("min_confidence", 0.6)),),
