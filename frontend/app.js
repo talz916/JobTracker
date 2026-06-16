@@ -52,10 +52,7 @@ let state = {
 async function init() {
   await checkAuth();
   await Promise.all([loadSettings(), loadApps(), loadStats()]);
-  renderStats();
-  renderFunnel();
-  renderWeekly();
-  renderTable();
+  renderAll();
 }
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
@@ -103,6 +100,23 @@ async function loadStats() {
 async function loadSettings() {
   const res = await fetch('/api/settings');
   state.settings = await res.json();
+}
+
+// Re-render every view from current state. Pair with loadApps()/loadStats()
+// when the data changed: `await Promise.all([loadApps(), loadStats()]); renderAll();`
+function renderAll() {
+  renderTable();
+  renderStats();
+  renderFunnel();
+  renderWeekly();
+}
+
+// Sync the drawer's stage badge to a stage value (or the current app's stage)
+function updateDrawerBadge(stage) {
+  if (stage == null) return;
+  const badge = document.getElementById('drawer-stage-badge');
+  badge.className = `badge badge-${esc(stage)}`;
+  badge.textContent = STAGE_LABELS[stage] || stage;
 }
 
 // ── Render Stats ──────────────────────────────────────────────────────────────
@@ -368,7 +382,7 @@ document.getElementById('merge-confirm')?.addEventListener('click', async () => 
   document.getElementById('select-all-cb').checked = false;
   updateMergeBtn();
   await Promise.all([loadApps(), loadStats()]);
-  renderTable(); renderStats(); renderFunnel(); renderWeekly();
+  renderAll();
 });
 
 // ── Sort headers ──────────────────────────────────────────────────────────────
@@ -418,8 +432,7 @@ async function openDrawer(appId) {
 
   document.getElementById('drawer-company').textContent = app.company;
   document.getElementById('drawer-role').textContent = app.role || '—';
-  document.getElementById('drawer-stage-badge').className = `badge badge-${app.stage}`;
-  document.getElementById('drawer-stage-badge').textContent = STAGE_LABELS[app.stage] || app.stage;
+  updateDrawerBadge(app.stage);
   document.getElementById('drawer-applied').textContent = fmtDate(app.applied_date) || '—';
   document.getElementById('drawer-source').textContent = app.source;
   document.getElementById('drawer-refer-btn').textContent =
@@ -495,13 +508,12 @@ async function loadTimeline(appId) {
 
       toast(`Event reclassified as "${STAGE_LABELS[newStage]}"`, 'success');
       await Promise.all([loadApps(), loadStats()]);
-      renderTable(); renderStats(); renderFunnel(); renderWeekly();
+      renderAll();
 
       const refreshed = state.apps.find(a => a.id === appId);
       if (refreshed) {
         state.currentApp = refreshed;
-        document.getElementById('drawer-stage-badge').className = `badge badge-${refreshed.stage}`;
-        document.getElementById('drawer-stage-badge').textContent = STAGE_LABELS[refreshed.stage] || refreshed.stage;
+        updateDrawerBadge(refreshed.stage);
         const moveSelect = document.getElementById('move-stage-select');
         if (moveSelect) moveSelect.value = refreshed.stage;
       }
@@ -516,12 +528,11 @@ async function loadTimeline(appId) {
       if (!res.ok) { toast('Delete failed', 'error'); return; }
       toast('Event deleted', 'success');
       await Promise.all([loadApps(), loadStats()]);
-      renderTable(); renderStats(); renderFunnel(); renderWeekly();
+      renderAll();
       const refreshed = state.apps.find(a => a.id === appId);
       if (refreshed) {
         state.currentApp = refreshed;
-        document.getElementById('drawer-stage-badge').className = `badge badge-${refreshed.stage}`;
-        document.getElementById('drawer-stage-badge').textContent = STAGE_LABELS[refreshed.stage] || refreshed.stage;
+        updateDrawerBadge(refreshed.stage);
       }
       await loadTimeline(appId);
     });
@@ -543,7 +554,7 @@ async function loadTimeline(appId) {
 
       toast(`Event moved to "${target?.role || target?.company || 'other position'}"`, 'success');
       await Promise.all([loadApps(), loadStats()]);
-      renderTable(); renderStats(); renderFunnel(); renderWeekly();
+      renderAll();
 
       // Refresh the drawer with updated data
       state.siblingApps = state.apps.filter(
@@ -552,8 +563,7 @@ async function loadTimeline(appId) {
       const refreshed = state.apps.find(a => a.id === appId);
       if (refreshed) {
         state.currentApp = refreshed;
-        document.getElementById('drawer-stage-badge').className = `badge badge-${refreshed.stage}`;
-        document.getElementById('drawer-stage-badge').textContent = STAGE_LABELS[refreshed.stage] || refreshed.stage;
+        updateDrawerBadge(refreshed.stage);
       }
       await loadTimeline(appId);
     });
@@ -612,12 +622,11 @@ document.getElementById('add-event-save')?.addEventListener('click', async () =>
 
   toast(`Logged: ${STAGE_LABELS[stage]}`, 'success');
   await Promise.all([loadApps(), loadStats()]);
-  renderTable(); renderStats(); renderFunnel(); renderWeekly();
+  renderAll();
   const refreshed = state.apps.find(a => a.id === app.id);
   if (refreshed) {
     state.currentApp = refreshed;
-    document.getElementById('drawer-stage-badge').className = `badge badge-${refreshed.stage}`;
-    document.getElementById('drawer-stage-badge').textContent = STAGE_LABELS[refreshed.stage] || refreshed.stage;
+    updateDrawerBadge(refreshed.stage);
     const moveSelect = document.getElementById('move-stage-select');
     if (moveSelect) moveSelect.value = refreshed.stage;
   }
@@ -645,8 +654,7 @@ document.getElementById('move-stage-btn')?.addEventListener('click', async () =>
   document.getElementById('move-stage-notes').value = '';
   document.getElementById('move-stage-date').value = '';
   state.currentApp = { ...app, stage };
-  document.getElementById('drawer-stage-badge').className = `badge badge-${stage}`;
-  document.getElementById('drawer-stage-badge').textContent = STAGE_LABELS[stage] || stage;
+  updateDrawerBadge(stage);
 
   await Promise.all([loadApps(), loadStats(), loadTimeline(app.id)]);
   renderTable();
@@ -713,7 +721,7 @@ document.getElementById('split-confirm')?.addEventListener('click', async () => 
   document.getElementById('split-modal-overlay').classList.remove('open');
   toast(`New position "${role}" created — open it to reassign emails`, 'success');
   await Promise.all([loadApps(), loadStats()]);
-  renderTable(); renderStats(); renderFunnel(); renderWeekly();
+  renderAll();
 
   // Refresh siblings in current drawer
   if (state.currentApp) {
@@ -875,7 +883,7 @@ document.getElementById('settings-reclassify')?.addEventListener('click', async 
     );
     closeSettings();
     await Promise.all([loadApps(), loadStats()]);
-    renderStats(); renderFunnel(); renderWeekly(); renderTable();
+    renderAll();
   } finally {
     btn.disabled = false;
     btn.textContent = original;
@@ -940,7 +948,7 @@ document.getElementById('sync-emails-btn')?.addEventListener('click', async () =
       toast(`Email sync done — ${r.applications_updated || 0} updated, ${r.ghosted_flagged || 0} ghosted`, 'success');
     }
     await Promise.all([loadApps(), loadStats()]);
-    renderTable(); renderStats(); renderFunnel(); renderWeekly();
+    renderAll();
   });
 });
 
@@ -966,7 +974,7 @@ document.getElementById('sync-calendar-btn')?.addEventListener('click', async ()
       toast(`Calendar sync done — ${r.applications_updated || 0} updated`, 'success');
     }
     await Promise.all([loadApps(), loadStats()]);
-    renderTable(); renderStats(); renderFunnel(); renderWeekly();
+    renderAll();
   });
 });
 

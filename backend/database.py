@@ -226,7 +226,7 @@ def delete_application(app_id: int):
 def merge_applications(keep_id: int, merge_ids: List[int]) -> Optional[dict]:
     """Move all stage events from merge_ids into keep_id, then delete the duplicates.
     The kept record is updated to the most advanced stage across all merged apps."""
-    from backend.models import STAGE_RANK, TERMINAL_STAGES
+    from backend.models import best_stage
     all_ids = [keep_id] + merge_ids
     with get_db() as conn:
         # Fetch all apps being merged
@@ -238,14 +238,7 @@ def merge_applications(keep_id: int, merge_ids: List[int]) -> Optional[dict]:
         if len(apps) < 2:
             return None
 
-        # Determine best stage: terminal stages take priority, otherwise highest rank
-        def stage_priority(stage):
-            if stage in TERMINAL_STAGES:
-                return (1, 0)
-            rank = STAGE_RANK.get(stage)
-            return (0, rank or 0)
-
-        best_stage = max((a["stage"] for a in apps), key=stage_priority)
+        merged_stage = best_stage(a["stage"] for a in apps)
 
         # Reassign stage_events — skip unique constraint conflicts (duplicate thread/cal IDs)
         for merge_id in merge_ids:
@@ -259,7 +252,7 @@ def merge_applications(keep_id: int, merge_ids: List[int]) -> Optional[dict]:
         # Update kept record with best stage and merge notes
         conn.execute(
             "UPDATE applications SET stage = ?, last_updated = ? WHERE id = ?",
-            (best_stage, datetime.utcnow().isoformat(), keep_id),
+            (merged_stage, datetime.utcnow().isoformat(), keep_id),
         )
 
         # Delete the merged duplicates
@@ -274,7 +267,7 @@ def merge_applications(keep_id: int, merge_ids: List[int]) -> Optional[dict]:
             """INSERT INTO stage_events
                (application_id, stage, event_type, event_date, subject)
                VALUES (?, ?, 'manual', ?, ?)""",
-            (keep_id, best_stage, datetime.utcnow().isoformat(),
+            (keep_id, merged_stage, datetime.utcnow().isoformat(),
              f"Merged duplicates: {merged_companies}"),
         )
 
@@ -327,12 +320,7 @@ def insert_stage_event(application_id: int, stage: str, event_type: str,
 
 def delete_event(event_id: int) -> bool:
     """Delete a stage_event and recalculate the parent application's stage."""
-    from backend.models import STAGE_RANK, TERMINAL_STAGES
-
-    def _best_stage(stages):
-        def priority(s):
-            return (1, 0) if s in TERMINAL_STAGES else (0, STAGE_RANK.get(s, 0))
-        return max(stages, key=priority)
+    from backend.models import best_stage
 
     with get_db() as conn:
         event = conn.execute(
@@ -352,19 +340,14 @@ def delete_event(event_id: int) -> bool:
         if remaining:
             conn.execute(
                 "UPDATE applications SET stage = ?, last_updated = ? WHERE id = ?",
-                (_best_stage(remaining), datetime.utcnow().isoformat(), app_id),
+                (best_stage(remaining), datetime.utcnow().isoformat(), app_id),
             )
         return True
 
 
 def update_event_stage(event_id: int, stage: str) -> Optional[dict]:
     """Update a stage_event's stage and recalculate the parent application's stage."""
-    from backend.models import STAGE_RANK, TERMINAL_STAGES
-
-    def _best_stage(stages):
-        def priority(s):
-            return (1, 0) if s in TERMINAL_STAGES else (0, STAGE_RANK.get(s, 0))
-        return max(stages, key=priority)
+    from backend.models import best_stage
 
     with get_db() as conn:
         event = conn.execute(
@@ -386,10 +369,9 @@ def update_event_stage(event_id: int, stage: str) -> Optional[dict]:
             ).fetchall()
         ]
         if all_stages:
-            best = _best_stage(all_stages)
             conn.execute(
                 "UPDATE applications SET stage = ?, last_updated = ? WHERE id = ?",
-                (best, datetime.utcnow().isoformat(), event["application_id"]),
+                (best_stage(all_stages), datetime.utcnow().isoformat(), event["application_id"]),
             )
 
         row = conn.execute(
@@ -400,12 +382,7 @@ def update_event_stage(event_id: int, stage: str) -> Optional[dict]:
 
 def reassign_event(event_id: int, target_app_id: int) -> Optional[dict]:
     """Move a stage_event to a different application and recalculate both apps' stages."""
-    from backend.models import STAGE_RANK, TERMINAL_STAGES
-
-    def _best_stage(stages):
-        def priority(s):
-            return (1, 0) if s in TERMINAL_STAGES else (0, STAGE_RANK.get(s, 0))
-        return max(stages, key=priority)
+    from backend.models import best_stage
 
     with get_db() as conn:
         event = conn.execute(
@@ -438,7 +415,7 @@ def reassign_event(event_id: int, target_app_id: int) -> Optional[dict]:
             if src_stages:
                 conn.execute(
                     "UPDATE applications SET stage = ?, last_updated = ? WHERE id = ?",
-                    (_best_stage(src_stages), datetime.utcnow().isoformat(), source_app_id),
+                    (best_stage(src_stages), datetime.utcnow().isoformat(), source_app_id),
                 )
 
         # Recalculate target app stage
@@ -451,7 +428,7 @@ def reassign_event(event_id: int, target_app_id: int) -> Optional[dict]:
         if tgt_stages:
             conn.execute(
                 "UPDATE applications SET stage = ?, last_updated = ? WHERE id = ?",
-                (_best_stage(tgt_stages), datetime.utcnow().isoformat(), target_app_id),
+                (best_stage(tgt_stages), datetime.utcnow().isoformat(), target_app_id),
             )
 
         return {"event_id": event_id, "application_id": target_app_id}
@@ -531,7 +508,7 @@ def get_stats() -> dict:
         weekly_volume.append({"week": week_str, "count": weekly_map.get(week_str, 0)})
 
     ordered = [
-        "applied", "recruiter_outreach", "phone_screen", "interview",
+        "applied", "phone_screen", "interview",
         "technical_assessment", "hr_interview", "offer",
         "rejected", "declined_offer", "ghosted",
     ]
@@ -597,7 +574,7 @@ def flag_ghosted(ghosted_days: int = 30) -> int:
     with get_db() as conn:
         rows = conn.execute(
             """SELECT id FROM applications
-               WHERE stage IN ('applied', 'recruiter_outreach')
+               WHERE stage = 'applied'
                AND archived = 0
                AND last_updated < ?""",
             (cutoff,),
