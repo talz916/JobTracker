@@ -21,8 +21,8 @@ from backend.models import ClassificationResult
 def db(tmp_path, monkeypatch):
     monkeypatch.setattr(database, "DB_PATH", str(tmp_path / "test.db"))
     database.init_db()
-    # The placeholder cache is module-global; reset it per test
-    monkeypatch.setattr(email_sync, "_placeholder_id", None)
+    # Placeholder is created fresh per call via db.get_or_create_placeholder()
+    # against this test's isolated DB — no module-global cache to reset.
     return database
 
 
