@@ -112,13 +112,27 @@ def _fetch_thread_ids(service, query: str, max_results: int = 500) -> list:
     return ids
 
 
-def _process_thread(service, thread_id: str, min_confidence: float) -> Optional[dict]:
-    if db.thread_exists(thread_id):
+def _parse_email_date(date_str: str) -> Optional[str]:
+    try:
+        from email.utils import parsedate_to_datetime
+        return parsedate_to_datetime(date_str).isoformat() if date_str else None
+    except Exception:
         return None
 
+
+def _process_thread(service, thread_id: str, min_confidence: float) -> Optional[dict]:
+    """Classify the newest unseen message in a thread.
+
+    Recruiting threads keep evolving — the rejection or interview invite
+    usually arrives as a reply to the confirmation email — so a thread is
+    never 'done': whenever it grows, the newest message is classified and
+    can advance the application's stage."""
+    # Cheap metadata fetch first: just enough to see whether the newest
+    # message is one we haven't classified yet.
     try:
         thread = service.users().threads().get(
-            userId="me", id=thread_id, format="full"
+            userId="me", id=thread_id, format="metadata",
+            metadataHeaders=["From", "Subject", "Date"],
         ).execute()
     except HttpError:
         return None
@@ -127,13 +141,31 @@ def _process_thread(service, thread_id: str, min_confidence: float) -> Optional[
     if not messages:
         return None
 
-    msg = messages[0]
+    newest_id = messages[-1]["id"]
+    known_ids = db.thread_message_ids(thread_id)
+    if newest_id in known_ids:
+        return None  # nothing new in this thread
+
+    if None in known_ids:
+        # Rows from before message-level tracking: stamp them with the first
+        # message's id so the thread isn't re-classified forever.
+        db.backfill_thread_message_id(thread_id, messages[0]["id"])
+        if len(messages) == 1:
+            return None  # the legacy row already covers the only message
+
+    try:
+        msg = service.users().messages().get(
+            userId="me", id=newest_id, format="full"
+        ).execute()
+    except HttpError:
+        return None
+
     payload = msg.get("payload", {})
     headers = payload.get("headers", [])
     sender = _get_header(headers, "From")
     subject = _get_header(headers, "Subject")
     body = _decode_body(payload)[:1500]
-    date_str = _get_header(headers, "Date")
+    event_date = _parse_email_date(_get_header(headers, "Date"))
 
     result = classify_email(sender, subject, body)
 
@@ -143,17 +175,11 @@ def _process_thread(service, thread_id: str, min_confidence: float) -> Optional[
             stage="other",
             event_type="email",
             thread_id=thread_id,
+            message_id=newest_id,
         )
         return None
 
     company = result.company or "Unknown Company"
-
-    try:
-        from email.utils import parsedate_to_datetime
-        event_date = parsedate_to_datetime(date_str).isoformat() if date_str else None
-    except Exception:
-        event_date = None
-
     source = "referral" if result.is_referral else "email"
 
     # Match by (company, role) when role is known; otherwise route to oldest active position
@@ -163,11 +189,15 @@ def _process_thread(service, thread_id: str, min_confidence: float) -> Optional[
         app = db.find_oldest_active_application_by_company(company)
 
     if app is None:
+        # applied_date comes from the thread's first message (the original
+        # application/confirmation), not the message being classified now.
+        first_headers = messages[0].get("payload", {}).get("headers", [])
+        applied = _parse_email_date(_get_header(first_headers, "Date")) or event_date
         app = db.create_application(
             company=company,
             role=result.role,
             stage=result.stage,
-            applied_date=event_date[:10] if event_date else None,
+            applied_date=applied[:10] if applied else None,
             source=source,
             notes=None,
             job_url=None,
@@ -186,6 +216,7 @@ def _process_thread(service, thread_id: str, min_confidence: float) -> Optional[
         event_date=event_date,
         subject=subject,
         thread_id=thread_id,
+        message_id=newest_id,
         snippet=body[:200],
     )
     return {"company": company, "stage": result.stage, "thread_id": thread_id}
