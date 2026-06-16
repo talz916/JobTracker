@@ -3,11 +3,16 @@ import os
 from typing import Optional, List
 from datetime import datetime, timedelta, timezone, date as date_type
 from contextlib import contextmanager
+from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
-DB_PATH = os.getenv("DATABASE_PATH", "jobhunter.db")
+# Anchor the default DB to the project root: a CWD-relative path silently
+# creates a second, empty database when the server is launched from another
+# directory (e.g. backend/), making all data appear to vanish.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DB_PATH = os.getenv("DATABASE_PATH") or str(_PROJECT_ROOT / "jobhunter.db")
 
 
 def utc_now_iso() -> str:
