@@ -50,6 +50,15 @@ def can_advance(current: str, new: str) -> bool:
     return new_rank > current_rank
 
 
+def best_stage(stages):
+    """The most-advanced stage in a list. Terminal stages (rejected/declined/
+    ghosted) outrank everything; among the rest, the highest STAGE_RANK wins.
+    Used to recompute an application's stage from its events."""
+    def priority(s):
+        return (1, 0) if s in TERMINAL_STAGES else (0, STAGE_RANK.get(s) or 0)
+    return max(stages, key=priority)
+
+
 class ApplicationCreate(BaseModel):
     company: str
     role: Optional[str] = None
@@ -95,6 +104,14 @@ class SettingsUpdate(BaseModel):
 class MergeRequest(BaseModel):
     keep_id: int
     merge_ids: List[int]
+
+
+class ReassignEventRequest(BaseModel):
+    application_id: int
+
+
+class UpdateEventStageRequest(BaseModel):
+    stage: str
 
 
 class ClassificationResult(BaseModel):

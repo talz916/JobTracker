@@ -11,17 +11,9 @@ from dotenv import load_dotenv
 import backend.database as db
 from backend.models import (
     ApplicationCreate, ApplicationUpdate, MoveStageRequest,
-    SettingsUpdate, MergeRequest, ALL_STAGES,
+    SettingsUpdate, MergeRequest, ReassignEventRequest,
+    UpdateEventStageRequest, ALL_STAGES,
 )
-from pydantic import BaseModel
-
-
-class ReassignEventRequest(BaseModel):
-    application_id: int
-
-
-class UpdateEventStageRequest(BaseModel):
-    stage: str
 
 load_dotenv(override=True)
 

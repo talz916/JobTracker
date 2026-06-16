@@ -90,7 +90,7 @@ def sync_calendar(min_confidence: float = 0.6, progress_cb=None) -> dict:
                     role=classification.role,
                     stage=classification.stage,
                     applied_date=start_dt[:10] if start_dt else None,
-                    source="email",
+                    source="calendar",
                     notes=None,
                     job_url=None,
                 )
