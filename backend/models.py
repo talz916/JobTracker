@@ -100,6 +100,22 @@ class SettingsUpdate(BaseModel):
     ghosted_days: Optional[int] = None
     min_confidence: Optional[float] = None
 
+    @field_validator("ghosted_days")
+    @classmethod
+    def _check_ghosted_days(cls, v):
+        # A non-positive value would back-date the cutoff to now-or-future and
+        # flag every 'applied' application as ghosted on the next sync.
+        if v is not None and v < 1:
+            raise ValueError("ghosted_days must be at least 1")
+        return v
+
+    @field_validator("min_confidence")
+    @classmethod
+    def _check_min_confidence(cls, v):
+        if v is not None and not (0.0 <= v <= 1.0):
+            raise ValueError("min_confidence must be between 0.0 and 1.0")
+        return v
+
 
 class MergeRequest(BaseModel):
     keep_id: int
