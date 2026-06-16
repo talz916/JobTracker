@@ -57,6 +57,10 @@ def get_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    # WAL lets the background sync write while API requests read, and the
+    # busy timeout prevents 'database is locked' under brief write contention
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 5000")
     try:
         yield conn
         conn.commit()
@@ -320,6 +324,19 @@ def thread_message_ids(thread_id: str) -> set:
             "SELECT message_id FROM stage_events WHERE thread_id = ?", (thread_id,)
         ).fetchall()
     return {r["message_id"] for r in rows}
+
+
+def all_thread_message_ids() -> dict:
+    """Map of thread_id -> set of recorded message ids, loaded in one query so
+    the sync doesn't issue one lookup per thread."""
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT thread_id, message_id FROM stage_events WHERE thread_id IS NOT NULL"
+        ).fetchall()
+    result: dict = {}
+    for r in rows:
+        result.setdefault(r["thread_id"], set()).add(r["message_id"])
+    return result
 
 
 def backfill_thread_message_id(thread_id: str, message_id: str):

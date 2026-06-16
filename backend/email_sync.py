@@ -1,6 +1,8 @@
 import base64
 import os
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, Set
 from datetime import datetime
 from google.oauth2.credentials import Credentials
@@ -112,6 +114,12 @@ def _fetch_thread_ids(service, query: str, max_results: int = 500) -> list:
     return ids
 
 
+# Workers fetch and classify in parallel, but application match-or-create must
+# be serialized: two emails from the same company processed at the same time
+# would otherwise both see "no application yet" and create duplicates.
+_db_write_lock = threading.Lock()
+
+
 def _parse_email_date(date_str: str) -> Optional[str]:
     try:
         from email.utils import parsedate_to_datetime
@@ -120,7 +128,8 @@ def _parse_email_date(date_str: str) -> Optional[str]:
         return None
 
 
-def _process_thread(service, thread_id: str, min_confidence: float) -> Optional[dict]:
+def _process_thread(service, thread_id: str, min_confidence: float,
+                    known_ids: Optional[set] = None) -> Optional[dict]:
     """Classify the newest unseen message in a thread.
 
     Recruiting threads keep evolving — the rejection or interview invite
@@ -142,7 +151,8 @@ def _process_thread(service, thread_id: str, min_confidence: float) -> Optional[
         return None
 
     newest_id = messages[-1]["id"]
-    known_ids = db.thread_message_ids(thread_id)
+    if known_ids is None:
+        known_ids = db.thread_message_ids(thread_id)
     if newest_id in known_ids:
         return None  # nothing new in this thread
 
@@ -169,56 +179,59 @@ def _process_thread(service, thread_id: str, min_confidence: float) -> Optional[
 
     result = classify_email(sender, subject, body)
 
-    if not result.is_job_related or result.confidence < min_confidence:
+    # Everything below mutates the DB based on a read — serialize it so
+    # parallel workers can't race on match-or-create.
+    with _db_write_lock:
+        if not result.is_job_related or result.confidence < min_confidence:
+            db.insert_stage_event(
+                application_id=_get_or_create_placeholder(),
+                stage="other",
+                event_type="email",
+                thread_id=thread_id,
+                message_id=newest_id,
+            )
+            return None
+
+        company = result.company or "Unknown Company"
+        source = "referral" if result.is_referral else "email"
+
+        # Match by (company, role) when role is known; otherwise route to oldest active position
+        if result.role:
+            app = db.find_application_by_company_and_role(company, result.role)
+        else:
+            app = db.find_oldest_active_application_by_company(company)
+
+        if app is None:
+            # applied_date comes from the thread's first message (the original
+            # application/confirmation), not the message being classified now.
+            first_headers = messages[0].get("payload", {}).get("headers", [])
+            applied = _parse_email_date(_get_header(first_headers, "Date")) or event_date
+            app = db.create_application(
+                company=company,
+                role=result.role,
+                stage=result.stage,
+                applied_date=applied[:10] if applied else None,
+                source=source,
+                notes=None,
+                job_url=None,
+            )
+        else:
+            if result.is_referral and app["source"] == "email":
+                db.update_application(app["id"], source="referral")
+            if can_advance(app["stage"], result.stage):
+                db.update_application(app["id"], stage=result.stage)
+                app = db.get_application(app["id"])
+
         db.insert_stage_event(
-            application_id=_get_or_create_placeholder(),
-            stage="other",
+            application_id=app["id"],
+            stage=result.stage,
             event_type="email",
+            event_date=event_date,
+            subject=subject,
             thread_id=thread_id,
             message_id=newest_id,
+            snippet=body[:200],
         )
-        return None
-
-    company = result.company or "Unknown Company"
-    source = "referral" if result.is_referral else "email"
-
-    # Match by (company, role) when role is known; otherwise route to oldest active position
-    if result.role:
-        app = db.find_application_by_company_and_role(company, result.role)
-    else:
-        app = db.find_oldest_active_application_by_company(company)
-
-    if app is None:
-        # applied_date comes from the thread's first message (the original
-        # application/confirmation), not the message being classified now.
-        first_headers = messages[0].get("payload", {}).get("headers", [])
-        applied = _parse_email_date(_get_header(first_headers, "Date")) or event_date
-        app = db.create_application(
-            company=company,
-            role=result.role,
-            stage=result.stage,
-            applied_date=applied[:10] if applied else None,
-            source=source,
-            notes=None,
-            job_url=None,
-        )
-    else:
-        if result.is_referral and app["source"] == "email":
-            db.update_application(app["id"], source="referral")
-        if can_advance(app["stage"], result.stage):
-            db.update_application(app["id"], stage=result.stage)
-            app = db.get_application(app["id"])
-
-    db.insert_stage_event(
-        application_id=app["id"],
-        stage=result.stage,
-        event_type="email",
-        event_date=event_date,
-        subject=subject,
-        thread_id=thread_id,
-        message_id=newest_id,
-        snippet=body[:200],
-    )
     return {"company": company, "stage": result.stage, "thread_id": thread_id}
 
 
@@ -245,8 +258,8 @@ def _get_or_create_placeholder() -> int:
 
 
 def sync_emails(gmail_label: str = "", min_confidence: float = 0.6,
-                progress_cb=None) -> dict:
-    service = _get_service()
+                progress_cb=None, service=None, max_workers: int = 6) -> dict:
+    service = service or _get_service()
     queries = list(KEYWORD_QUERIES)
     if gmail_label:
         queries.insert(0, f'label:"{gmail_label}"')
@@ -268,19 +281,32 @@ def sync_emails(gmail_label: str = "", min_confidence: float = 0.6,
                 all_ids.append(tid)
 
     total = len(all_ids)
-    processed = 0
-    added = 0
 
     if progress_cb:
         progress_cb(0, total, 0, f"Found {total} threads to check…")
 
-    for tid in all_ids:
-        processed += 1
-        result = _process_thread(service, tid, min_confidence)
-        if result:
-            added += 1
+    # One query for everything we've already recorded, instead of one per thread
+    known = db.all_thread_message_ids()
+
+    progress_lock = threading.Lock()
+    counters = {"processed": 0, "added": 0}
+
+    def _work(tid: str):
+        result = _process_thread(service, tid, min_confidence,
+                                 known_ids=known.get(tid))
+        with progress_lock:
+            counters["processed"] += 1
+            if result:
+                counters["added"] += 1
+            processed, added = counters["processed"], counters["added"]
         if progress_cb and (processed % 5 == 0 or processed == total):
             progress_cb(processed, total, added,
                         f"Checking {processed}/{total} threads — {added} applications updated")
 
-    return {"threads_checked": processed, "applications_updated": added}
+    # The slow parts (Gmail fetch + Claude classification) run in parallel;
+    # DB mutations are serialized by _db_write_lock inside _process_thread.
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        list(executor.map(_work, all_ids))
+
+    return {"threads_checked": counters["processed"],
+            "applications_updated": counters["added"]}
