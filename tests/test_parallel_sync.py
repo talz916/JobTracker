@@ -77,16 +77,10 @@ class FakeGmail:
             def execute(self):
                 return self._data
 
-        if format == "metadata":
-            msgs = self.threads_by_id[id]
-            meta = [{"id": m["id"], "payload": {"headers": m["payload"]["headers"]}}
-                    for m in msgs]
-            return _Call({"id": id, "messages": meta})
-        for msgs in self.threads_by_id.values():
-            for m in msgs:
-                if m["id"] == id:
-                    return _Call(m)
-        raise AssertionError(f"unknown message id {id}")
+        # threads().get(id=thread_id, format="full") → the full thread
+        if id in self.threads_by_id:
+            return _Call({"id": id, "messages": self.threads_by_id[id]})
+        raise AssertionError(f"unknown thread id {id}")
 
 
 def test_parallel_sync_no_duplicate_applications(db, monkeypatch):

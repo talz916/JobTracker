@@ -131,19 +131,23 @@ def _parse_email_date(date_str: str) -> Optional[str]:
 
 
 def _process_thread(service, thread_id: str, min_confidence: float,
-                    known_ids: Optional[set] = None) -> Optional[dict]:
-    """Classify the newest unseen message in a thread.
+                    known_thread_ids: Optional[set] = None) -> Optional[dict]:
+    """Classify the FIRST message of a thread we haven't seen before.
 
-    Recruiting threads keep evolving — the rejection or interview invite
-    usually arrives as a reply to the confirmation email — so a thread is
-    never 'done': whenever it grows, the newest message is classified and
-    can advance the application's stage."""
-    # Cheap metadata fetch first: just enough to see whether the newest
-    # message is one we haven't classified yet.
+    Once a thread has been recorded it is never re-processed — later replies
+    (e.g. a rejection sent in-thread) are not picked up automatically; add
+    those by hand on the rare occasion they occur. This keeps sync to its
+    original, predictable behavior: update existing entries or add new ones,
+    never resurrect or duplicate an entry from a follow-up email."""
+    if known_thread_ids is not None:
+        if thread_id in known_thread_ids:
+            return None
+    elif db.thread_exists(thread_id):
+        return None
+
     try:
         thread = service.users().threads().get(
-            userId="me", id=thread_id, format="metadata",
-            metadataHeaders=["From", "Subject", "Date"],
+            userId="me", id=thread_id, format="full"
         ).execute()
     except HttpError:
         return None
@@ -152,26 +156,8 @@ def _process_thread(service, thread_id: str, min_confidence: float,
     if not messages:
         return None
 
-    newest_id = messages[-1]["id"]
-    if known_ids is None:
-        known_ids = db.thread_message_ids(thread_id)
-    if newest_id in known_ids:
-        return None  # nothing new in this thread
-
-    if None in known_ids:
-        # Rows from before message-level tracking: stamp them with the first
-        # message's id so the thread isn't re-classified forever.
-        db.backfill_thread_message_id(thread_id, messages[0]["id"])
-        if len(messages) == 1:
-            return None  # the legacy row already covers the only message
-
-    try:
-        msg = service.users().messages().get(
-            userId="me", id=newest_id, format="full"
-        ).execute()
-    except HttpError:
-        return None
-
+    msg = messages[0]
+    msg_id = msg.get("id")
     payload = msg.get("payload", {})
     headers = payload.get("headers", [])
     sender = _get_header(headers, "From")
@@ -190,7 +176,7 @@ def _process_thread(service, thread_id: str, min_confidence: float,
                 stage="other",
                 event_type="email",
                 thread_id=thread_id,
-                message_id=newest_id,
+                message_id=msg_id,
             )
             return None
 
@@ -204,15 +190,11 @@ def _process_thread(service, thread_id: str, min_confidence: float,
             app = db.find_oldest_active_application_by_company(company)
 
         if app is None:
-            # applied_date comes from the thread's first message (the original
-            # application/confirmation), not the message being classified now.
-            first_headers = messages[0].get("payload", {}).get("headers", [])
-            applied = _parse_email_date(_get_header(first_headers, "Date")) or event_date
             app = db.create_application(
                 company=company,
                 role=result.role,
                 stage=result.stage,
-                applied_date=applied[:10] if applied else None,
+                applied_date=event_date[:10] if event_date else None,
                 source=source,
                 notes=None,
                 job_url=None,
@@ -231,7 +213,7 @@ def _process_thread(service, thread_id: str, min_confidence: float,
             event_date=event_date,
             subject=subject,
             thread_id=thread_id,
-            message_id=newest_id,
+            message_id=msg_id,
             snippet=body[:200],
         )
     return {"company": company, "stage": result.stage, "thread_id": thread_id}
@@ -281,15 +263,16 @@ def sync_emails(gmail_label: str = "", min_confidence: float = 0.6,
     if progress_cb:
         progress_cb(0, total, 0, f"Found {total} threads to check…")
 
-    # One query for everything we've already recorded, instead of one per thread
-    known = db.all_thread_message_ids()
+    # One query for every thread we've already recorded, so each worker can
+    # skip seen threads without its own DB round-trip.
+    known_threads = set(db.all_thread_message_ids().keys())
 
     progress_lock = threading.Lock()
     counters = {"processed": 0, "added": 0}
 
     def _work(tid: str):
         result = _process_thread(worker_service(), tid, min_confidence,
-                                 known_ids=known.get(tid))
+                                 known_thread_ids=known_threads)
         with progress_lock:
             counters["processed"] += 1
             if result:
