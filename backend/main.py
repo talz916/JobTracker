@@ -5,7 +5,7 @@ from typing import Optional
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from dotenv import load_dotenv
 
 import backend.database as db
@@ -136,18 +136,26 @@ def auth_url():
 
 
 @app.get("/api/auth/callback")
-def auth_callback(request: Request, code: str, state: Optional[str] = None):
+def auth_callback(request: Request, code: Optional[str] = None,
+                  state: Optional[str] = None, error: Optional[str] = None):
     global _pending_flow
-    if _pending_flow is None:
-        return FileResponse(FRONTEND_DIR / "index.html")
+    # User cancelled the consent screen (?error=access_denied), arrived without
+    # a code, or no auth is in progress — back to the dashboard, no stack trace.
+    if error or not code or _pending_flow is None:
+        return RedirectResponse("/", status_code=303)
     flow = _pending_flow
     _pending_flow = None
-    # Pass the full callback URL so fetch_token can validate state and use the PKCE verifier
-    flow.fetch_token(authorization_response=str(request.url))
+    try:
+        # Pass the full callback URL so fetch_token can validate state and use the PKCE verifier
+        flow.fetch_token(authorization_response=str(request.url))
+    except Exception:
+        return RedirectResponse("/?auth_error=1", status_code=303)
     Path(TOKEN_FILE).parent.mkdir(parents=True, exist_ok=True)
     with open(TOKEN_FILE, "w") as f:
         f.write(flow.credentials.to_json())
-    return FileResponse(FRONTEND_DIR / "index.html")
+    # Redirect rather than serving the page here, so the one-time auth code
+    # doesn't linger in the browser's address bar and history.
+    return RedirectResponse("/", status_code=303)
 
 
 # ── Settings ───────────────────────────────────────────────────────────────────
