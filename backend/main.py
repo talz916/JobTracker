@@ -3,7 +3,6 @@ import json
 import threading
 from typing import Optional
 from pathlib import Path
-from datetime import datetime
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -186,7 +185,7 @@ def create_application(body: ApplicationCreate):
     )
     db.insert_stage_event(
         application_id=application["id"], stage=body.stage,
-        event_type="manual", event_date=datetime.utcnow().isoformat(),
+        event_type="manual", event_date=db.utc_now_iso(),
         subject="Manual entry",
     )
     return application
@@ -226,7 +225,7 @@ def update_application(app_id: int, body: ApplicationUpdate):
     if stage_changed:
         db.insert_stage_event(
             application_id=app_id, stage=updates["stage"],
-            event_type="manual", event_date=datetime.utcnow().isoformat(),
+            event_type="manual", event_date=db.utc_now_iso(),
             subject=f"Stage manually updated to {updates['stage']}",
         )
     return updated
@@ -259,7 +258,7 @@ def log_event(app_id: int, body: MoveStageRequest):
         db.update_application(app_id, stage=body.stage)
     db.insert_stage_event(
         application_id=app_id, stage=body.stage, event_type="manual",
-        event_date=(body.event_date or datetime.utcnow()).isoformat(),
+        event_date=body.event_date or db.utc_now_iso(),
         subject=body.notes or f"Logged: {body.stage}",
         snippet=body.notes,
     )
@@ -276,7 +275,7 @@ def move_stage(app_id: int, body: MoveStageRequest):
     updated = db.update_application(app_id, stage=body.stage)
     db.insert_stage_event(
         application_id=app_id, stage=body.stage, event_type="manual",
-        event_date=(body.event_date or datetime.utcnow()).isoformat(),
+        event_date=body.event_date or db.utc_now_iso(),
         subject=body.notes or f"Manually moved to {body.stage}",
         snippet=body.notes,
     )

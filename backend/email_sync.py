@@ -113,9 +113,11 @@ def _fetch_thread_ids(service, query: str, max_results: int = 500) -> list:
 
 
 def _parse_email_date(date_str: str) -> Optional[str]:
+    # Normalize to the canonical naive-UTC format: email Date headers carry
+    # arbitrary timezone offsets that would otherwise break string ordering.
     try:
         from email.utils import parsedate_to_datetime
-        return parsedate_to_datetime(date_str).isoformat() if date_str else None
+        return db.to_utc_iso(parsedate_to_datetime(date_str)) if date_str else None
     except Exception:
         return None
 

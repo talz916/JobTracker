@@ -1,13 +1,48 @@
 import sqlite3
 import os
 from typing import Optional, List
-from datetime import datetime, timedelta, date as date_type
+from datetime import datetime, timedelta, timezone, date as date_type
 from contextlib import contextmanager
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
 DB_PATH = os.getenv("DATABASE_PATH", "jobhunter.db")
+
+
+def utc_now_iso() -> str:
+    """Canonical timestamp format for every datetime stored in the DB:
+    naive UTC ISO-8601 with a 'T' separator ('YYYY-MM-DDTHH:MM:SS.ffffff').
+    Timestamps are compared as strings in SQL, so a single format is what
+    keeps ordering and cutoff comparisons correct."""
+    return datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+
+
+def to_utc_iso(value) -> Optional[str]:
+    """Normalize a timestamp to the canonical format. Accepts datetime
+    objects, SQLite CURRENT_TIMESTAMP strings ('YYYY-MM-DD HH:MM:SS'), and
+    ISO strings with timezone offsets or 'Z'. Date-only strings (all-day
+    calendar events) pass through unchanged; unparseable values yield None."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        v = str(value).strip()
+        if len(v) == 10:
+            try:
+                datetime.strptime(v, "%Y-%m-%d")
+                return v
+            except ValueError:
+                return None
+        v = v.replace(" ", "T", 1).replace("Z", "+00:00")
+        try:
+            dt = datetime.fromisoformat(v)
+        except ValueError:
+            return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt.isoformat()
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS applications (
@@ -107,6 +142,24 @@ def init_db():
             """CREATE UNIQUE INDEX IF NOT EXISTS idx_thread_msg
                ON stage_events(thread_id, message_id) WHERE thread_id IS NOT NULL"""
         )
+        # Migrate: normalize legacy timestamps to the canonical naive-UTC ISO
+        # format. Rows used to mix SQLite CURRENT_TIMESTAMP ('YYYY-MM-DD
+        # HH:MM:SS'), naive isoformat(), and email dates carrying arbitrary
+        # timezone offsets — string comparison across those formats broke
+        # ghosted-detection cutoffs and event ordering.
+        for table, cols in (("applications", ("last_updated",)),
+                            ("stage_events", ("event_date", "created_at"))):
+            rows = conn.execute(
+                f"SELECT id, {', '.join(cols)} FROM {table}"
+            ).fetchall()
+            for row in rows:
+                for col in cols:
+                    normalized = to_utc_iso(row[col])
+                    if normalized is not None and normalized != row[col]:
+                        conn.execute(
+                            f"UPDATE {table} SET {col} = ? WHERE id = ?",
+                            (normalized, row["id"]),
+                        )
 
 
 # ── Settings ──────────────────────────────────────────────────────────────────
@@ -136,9 +189,9 @@ def create_application(company: str, role: Optional[str], stage: str,
     with get_db() as conn:
         cur = conn.execute(
             """INSERT INTO applications
-               (company, role, stage, applied_date, source, notes, job_url)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (company, role, stage, applied_date, source, notes, job_url),
+               (company, role, stage, applied_date, source, notes, job_url, last_updated)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (company, role, stage, applied_date, source, notes, job_url, utc_now_iso()),
         )
         row = conn.execute(
             "SELECT * FROM applications WHERE id = ?", (cur.lastrowid,)
@@ -211,7 +264,7 @@ def list_applications(stage: Optional[str] = None, company: Optional[str] = None
 def update_application(app_id: int, **fields) -> Optional[dict]:
     if not fields:
         return get_application(app_id)
-    fields["last_updated"] = datetime.utcnow().isoformat()
+    fields["last_updated"] = utc_now_iso()
     set_clause = ", ".join(f"{k} = ?" for k in fields)
     values = list(fields.values()) + [app_id]
     with get_db() as conn:
@@ -229,7 +282,7 @@ def archive_application(app_id: int):
     with get_db() as conn:
         conn.execute(
             "UPDATE applications SET archived = 1, last_updated = ? WHERE id = ?",
-            (datetime.utcnow().isoformat(), app_id),
+            (utc_now_iso(), app_id),
         )
 
 
@@ -275,7 +328,7 @@ def merge_applications(keep_id: int, merge_ids: List[int]) -> Optional[dict]:
         # Update kept record with best stage and merge notes
         conn.execute(
             "UPDATE applications SET stage = ?, last_updated = ? WHERE id = ?",
-            (best_stage, datetime.utcnow().isoformat(), keep_id),
+            (best_stage, utc_now_iso(), keep_id),
         )
 
         # Delete the merged duplicates
@@ -290,7 +343,7 @@ def merge_applications(keep_id: int, merge_ids: List[int]) -> Optional[dict]:
             """INSERT INTO stage_events
                (application_id, stage, event_type, event_date, subject)
                VALUES (?, ?, 'manual', ?, ?)""",
-            (keep_id, best_stage, datetime.utcnow().isoformat(),
+            (keep_id, best_stage, utc_now_iso(),
              f"Merged duplicates: {merged_companies}"),
         )
 
@@ -374,10 +427,10 @@ def insert_stage_event(application_id: int, stage: str, event_type: str,
         conn.execute(
             """INSERT OR IGNORE INTO stage_events
                (application_id, stage, event_type, event_date, subject,
-                thread_id, message_id, calendar_event_id, snippet)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (application_id, stage, event_type, event_date, subject,
-             thread_id, message_id, calendar_event_id, snippet),
+                thread_id, message_id, calendar_event_id, snippet, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (application_id, stage, event_type, to_utc_iso(event_date), subject,
+             thread_id, message_id, calendar_event_id, snippet, utc_now_iso()),
         )
 
 
@@ -408,7 +461,7 @@ def delete_event(event_id: int) -> bool:
         if remaining:
             conn.execute(
                 "UPDATE applications SET stage = ?, last_updated = ? WHERE id = ?",
-                (_best_stage(remaining), datetime.utcnow().isoformat(), app_id),
+                (_best_stage(remaining), utc_now_iso(), app_id),
             )
         return True
 
@@ -445,7 +498,7 @@ def update_event_stage(event_id: int, stage: str) -> Optional[dict]:
             best = _best_stage(all_stages)
             conn.execute(
                 "UPDATE applications SET stage = ?, last_updated = ? WHERE id = ?",
-                (best, datetime.utcnow().isoformat(), event["application_id"]),
+                (best, utc_now_iso(), event["application_id"]),
             )
 
         row = conn.execute(
@@ -494,7 +547,7 @@ def reassign_event(event_id: int, target_app_id: int) -> Optional[dict]:
             if src_stages:
                 conn.execute(
                     "UPDATE applications SET stage = ?, last_updated = ? WHERE id = ?",
-                    (_best_stage(src_stages), datetime.utcnow().isoformat(), source_app_id),
+                    (_best_stage(src_stages), utc_now_iso(), source_app_id),
                 )
 
         # Recalculate target app stage
@@ -507,7 +560,7 @@ def reassign_event(event_id: int, target_app_id: int) -> Optional[dict]:
         if tgt_stages:
             conn.execute(
                 "UPDATE applications SET stage = ?, last_updated = ? WHERE id = ?",
-                (_best_stage(tgt_stages), datetime.utcnow().isoformat(), target_app_id),
+                (_best_stage(tgt_stages), utc_now_iso(), target_app_id),
             )
 
         return {"event_id": event_id, "application_id": target_app_id}
@@ -649,7 +702,9 @@ def reset_email_cache() -> dict:
 # ── Ghosted auto-detection ─────────────────────────────────────────────────────
 
 def flag_ghosted(ghosted_days: int = 30) -> int:
-    cutoff = (datetime.utcnow() - timedelta(days=ghosted_days)).isoformat()
+    cutoff = (
+        datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=ghosted_days)
+    ).isoformat()
     with get_db() as conn:
         rows = conn.execute(
             """SELECT id FROM applications
@@ -662,12 +717,12 @@ def flag_ghosted(ghosted_days: int = 30) -> int:
             app_id = row["id"]
             conn.execute(
                 "UPDATE applications SET stage = 'ghosted', last_updated = ? WHERE id = ?",
-                (datetime.utcnow().isoformat(), app_id),
+                (utc_now_iso(), app_id),
             )
             conn.execute(
                 """INSERT OR IGNORE INTO stage_events
                    (application_id, stage, event_type, event_date, subject)
                    VALUES (?, 'ghosted', 'auto', ?, 'Auto-flagged as ghosted')""",
-                (app_id, datetime.utcnow().isoformat()),
+                (app_id, utc_now_iso()),
             )
     return len(rows)
