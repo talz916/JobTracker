@@ -275,10 +275,10 @@ function renderTable() {
       </td>
       <td>${companyCell}</td>
       <td>${esc(app.role || '—')}</td>
-      <td><span class="badge badge-${app.stage}">${STAGE_LABELS[app.stage] || app.stage}</span></td>
+      <td><span class="badge badge-${esc(app.stage)}">${STAGE_LABELS[app.stage] || esc(app.stage)}</span></td>
       <td>${fmtDate(app.applied_date)}</td>
       <td>${fmtDate(app.last_updated)}</td>
-      <td style="color:var(--muted);text-transform:capitalize">${app.source}</td>
+      <td style="color:var(--muted);text-transform:capitalize">${esc(app.source)}</td>
     </tr>
   `;
   }).join('');
@@ -320,7 +320,7 @@ document.getElementById('merge-btn')?.addEventListener('click', () => {
   const selected = state.apps.filter(a => _selectedIds.has(a.id));
   const sel = document.getElementById('merge-keep-select');
   sel.innerHTML = selected.map(a =>
-    `<option value="${a.id}">${esc(a.company)}${a.role ? ' — ' + esc(a.role) : ''} [${STAGE_LABELS[a.stage] || a.stage}]</option>`
+    `<option value="${a.id}">${esc(a.company)}${a.role ? ' — ' + esc(a.role) : ''} [${STAGE_LABELS[a.stage] || esc(a.stage)}]</option>`
   ).join('');
   // Default: pre-select the most advanced stage
   const ranked = [...selected].sort((a, b) => {
@@ -424,9 +424,11 @@ async function openDrawer(appId) {
   document.getElementById('drawer-source').textContent = app.source;
   document.getElementById('drawer-refer-btn').textContent =
     app.source === 'referral' ? 'Unmark Referral' : 'Mark as Referred';
-  document.getElementById('drawer-url').innerHTML = app.job_url
-    ? `<a href="${esc(app.job_url)}" target="_blank" style="color:var(--accent)">${esc(app.job_url)}</a>`
-    : '—';
+  // Only render real http(s) links — anything else (e.g. javascript:) shows as plain text
+  const safeUrl = app.job_url && /^https?:\/\//i.test(app.job_url) ? app.job_url : null;
+  document.getElementById('drawer-url').innerHTML = safeUrl
+    ? `<a href="${esc(safeUrl)}" target="_blank" rel="noopener noreferrer" style="color:var(--accent)">${esc(safeUrl)}</a>`
+    : (app.job_url ? esc(app.job_url) : '—');
   document.getElementById('drawer-notes').textContent = app.notes || '—';
 
   // Populate move-stage select
@@ -469,12 +471,12 @@ async function loadTimeline(appId) {
         </div>
         <div class="tl-subject">${esc(ev.subject || '')}</div>
         <div class="tl-date">${fmtDateTime(ev.event_date || ev.created_at)}</div>
-        <div class="tl-type">${ev.event_type}</div>
+        <div class="tl-type">${esc(ev.event_type)}</div>
         ${siblings.length > 0 ? `
           <div style="margin-top:4px">
             <select class="reassign-select filter-select" data-event-id="${ev.id}" style="font-size:11px;padding:2px 6px;height:auto">
               <option value="">Move to position…</option>
-              ${siblings.map(s => `<option value="${s.id}">${esc(s.role || s.company)} [${STAGE_LABELS[s.stage] || s.stage}]</option>`).join('')}
+              ${siblings.map(s => `<option value="${s.id}">${esc(s.role || s.company)} [${STAGE_LABELS[s.stage] || esc(s.stage)}]</option>`).join('')}
             </select>
           </div>
         ` : ''}
@@ -987,7 +989,8 @@ if (filterStageSelect) {
 
 function esc(str) {
   if (!str) return '';
-  return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 
 function fmtDate(str) {
