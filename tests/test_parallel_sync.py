@@ -161,3 +161,33 @@ def test_wal_mode_enabled(db):
     with db.get_db() as conn:
         mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
     assert mode == "wal"
+
+
+def test_each_worker_builds_its_own_service(db, monkeypatch):
+    """Gmail's httplib2 transport is not thread-safe — sharing one service
+    across workers corrupts the TLS stream ('[SSL: WRONG_VERSION_NUMBER]').
+    When no service is injected, sync must build a client per worker thread,
+    not reuse a single shared one."""
+    threads = {
+        f"t{i}": [make_msg(f"m{i}", "jobs@acme.com", f"S{i}",
+                           "We received your application.")]
+        for i in range(8)
+    }
+    built = []
+
+    def fake_get_service():
+        svc = FakeGmail(threads)
+        built.append(svc)
+        return svc
+
+    monkeypatch.setattr(email_sync, "_get_service", fake_get_service)
+    monkeypatch.setattr(email_sync, "classify_email",
+                        lambda s, su, b: ClassificationResult(
+                            company="Acme", role=None, stage="applied",
+                            confidence=0.95, is_job_related=True))
+
+    # No service injected → production path must build per-thread clients.
+    email_sync.sync_emails(max_workers=4)
+
+    # At least the collection client plus one per-worker client — never just one.
+    assert len(built) >= 2

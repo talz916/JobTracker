@@ -259,7 +259,23 @@ def _get_or_create_placeholder() -> int:
 
 def sync_emails(gmail_label: str = "", min_confidence: float = 0.6,
                 progress_cb=None, service=None, max_workers: int = 6) -> dict:
-    service = service or _get_service()
+    # The Gmail client is built on httplib2, which is NOT thread-safe: sharing
+    # one service across worker threads corrupts the TLS stream and fails with
+    # '[SSL: WRONG_VERSION_NUMBER]'. So each worker thread gets its own client.
+    # When a service is injected (tests), reuse it as-is — fakes have no sockets.
+    injected = service is not None
+    _tlocal = threading.local()
+
+    def worker_service():
+        if injected:
+            return service
+        svc = getattr(_tlocal, "svc", None)
+        if svc is None:
+            svc = _get_service()
+            _tlocal.svc = svc
+        return svc
+
+    service = service or _get_service()  # used for the sequential thread-id collection
     queries = list(KEYWORD_QUERIES)
     if gmail_label:
         queries.insert(0, f'label:"{gmail_label}"')
@@ -292,7 +308,7 @@ def sync_emails(gmail_label: str = "", min_confidence: float = 0.6,
     counters = {"processed": 0, "added": 0}
 
     def _work(tid: str):
-        result = _process_thread(service, tid, min_confidence,
+        result = _process_thread(worker_service(), tid, min_confidence,
                                  known_ids=known.get(tid))
         with progress_lock:
             counters["processed"] += 1
