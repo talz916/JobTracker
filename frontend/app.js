@@ -50,12 +50,14 @@ let state = {
 // ── Init ──────────────────────────────────────────────────────────────────────
 
 async function init() {
+  const params = new URLSearchParams(window.location.search);
+  if (params.has('auth_error')) {
+    toast('Google sign-in failed — please try connecting again', 'error');
+    history.replaceState(null, '', '/');
+  }
   await checkAuth();
   await Promise.all([loadSettings(), loadApps(), loadStats()]);
-  renderStats();
-  renderFunnel();
-  renderWeekly();
-  renderTable();
+  renderAll();
 }
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
@@ -103,6 +105,23 @@ async function loadStats() {
 async function loadSettings() {
   const res = await fetch('/api/settings');
   state.settings = await res.json();
+}
+
+// Re-render every view from current state. Pair with loadApps()/loadStats()
+// when the data changed: `await Promise.all([loadApps(), loadStats()]); renderAll();`
+function renderAll() {
+  renderTable();
+  renderStats();
+  renderFunnel();
+  renderWeekly();
+}
+
+// Sync the drawer's stage badge to a stage value (or the current app's stage)
+function updateDrawerBadge(stage) {
+  if (stage == null) return;
+  const badge = document.getElementById('drawer-stage-badge');
+  badge.className = `badge badge-${esc(stage)}`;
+  badge.textContent = STAGE_LABELS[stage] || stage;
 }
 
 // ── Render Stats ──────────────────────────────────────────────────────────────
@@ -275,10 +294,10 @@ function renderTable() {
       </td>
       <td>${companyCell}</td>
       <td>${esc(app.role || '—')}</td>
-      <td><span class="badge badge-${app.stage}">${STAGE_LABELS[app.stage] || app.stage}</span></td>
+      <td><span class="badge badge-${esc(app.stage)}">${STAGE_LABELS[app.stage] || esc(app.stage)}</span></td>
       <td>${fmtDate(app.applied_date)}</td>
       <td>${fmtDate(app.last_updated)}</td>
-      <td style="color:var(--muted);text-transform:capitalize">${app.source}</td>
+      <td style="color:var(--muted);text-transform:capitalize">${esc(app.source)}</td>
     </tr>
   `;
   }).join('');
@@ -320,7 +339,7 @@ document.getElementById('merge-btn')?.addEventListener('click', () => {
   const selected = state.apps.filter(a => _selectedIds.has(a.id));
   const sel = document.getElementById('merge-keep-select');
   sel.innerHTML = selected.map(a =>
-    `<option value="${a.id}">${esc(a.company)}${a.role ? ' — ' + esc(a.role) : ''} [${STAGE_LABELS[a.stage] || a.stage}]</option>`
+    `<option value="${a.id}">${esc(a.company)}${a.role ? ' — ' + esc(a.role) : ''} [${STAGE_LABELS[a.stage] || esc(a.stage)}]</option>`
   ).join('');
   // Default: pre-select the most advanced stage
   const ranked = [...selected].sort((a, b) => {
@@ -368,7 +387,7 @@ document.getElementById('merge-confirm')?.addEventListener('click', async () => 
   document.getElementById('select-all-cb').checked = false;
   updateMergeBtn();
   await Promise.all([loadApps(), loadStats()]);
-  renderTable(); renderStats(); renderFunnel(); renderWeekly();
+  renderAll();
 });
 
 // ── Sort headers ──────────────────────────────────────────────────────────────
@@ -418,15 +437,16 @@ async function openDrawer(appId) {
 
   document.getElementById('drawer-company').textContent = app.company;
   document.getElementById('drawer-role').textContent = app.role || '—';
-  document.getElementById('drawer-stage-badge').className = `badge badge-${app.stage}`;
-  document.getElementById('drawer-stage-badge').textContent = STAGE_LABELS[app.stage] || app.stage;
+  updateDrawerBadge(app.stage);
   document.getElementById('drawer-applied').textContent = fmtDate(app.applied_date) || '—';
   document.getElementById('drawer-source').textContent = app.source;
   document.getElementById('drawer-refer-btn').textContent =
     app.source === 'referral' ? 'Unmark Referral' : 'Mark as Referred';
-  document.getElementById('drawer-url').innerHTML = app.job_url
-    ? `<a href="${esc(app.job_url)}" target="_blank" style="color:var(--accent)">${esc(app.job_url)}</a>`
-    : '—';
+  // Only render real http(s) links — anything else (e.g. javascript:) shows as plain text
+  const safeUrl = app.job_url && /^https?:\/\//i.test(app.job_url) ? app.job_url : null;
+  document.getElementById('drawer-url').innerHTML = safeUrl
+    ? `<a href="${esc(safeUrl)}" target="_blank" rel="noopener noreferrer" style="color:var(--accent)">${esc(safeUrl)}</a>`
+    : (app.job_url ? esc(app.job_url) : '—');
   document.getElementById('drawer-notes').textContent = app.notes || '—';
 
   // Populate move-stage select
@@ -469,12 +489,12 @@ async function loadTimeline(appId) {
         </div>
         <div class="tl-subject">${esc(ev.subject || '')}</div>
         <div class="tl-date">${fmtDateTime(ev.event_date || ev.created_at)}</div>
-        <div class="tl-type">${ev.event_type}</div>
+        <div class="tl-type">${esc(ev.event_type)}</div>
         ${siblings.length > 0 ? `
           <div style="margin-top:4px">
             <select class="reassign-select filter-select" data-event-id="${ev.id}" style="font-size:11px;padding:2px 6px;height:auto">
               <option value="">Move to position…</option>
-              ${siblings.map(s => `<option value="${s.id}">${esc(s.role || s.company)} [${STAGE_LABELS[s.stage] || s.stage}]</option>`).join('')}
+              ${siblings.map(s => `<option value="${s.id}">${esc(s.role || s.company)} [${STAGE_LABELS[s.stage] || esc(s.stage)}]</option>`).join('')}
             </select>
           </div>
         ` : ''}
@@ -495,13 +515,12 @@ async function loadTimeline(appId) {
 
       toast(`Event reclassified as "${STAGE_LABELS[newStage]}"`, 'success');
       await Promise.all([loadApps(), loadStats()]);
-      renderTable(); renderStats(); renderFunnel(); renderWeekly();
+      renderAll();
 
       const refreshed = state.apps.find(a => a.id === appId);
       if (refreshed) {
         state.currentApp = refreshed;
-        document.getElementById('drawer-stage-badge').className = `badge badge-${refreshed.stage}`;
-        document.getElementById('drawer-stage-badge').textContent = STAGE_LABELS[refreshed.stage] || refreshed.stage;
+        updateDrawerBadge(refreshed.stage);
         const moveSelect = document.getElementById('move-stage-select');
         if (moveSelect) moveSelect.value = refreshed.stage;
       }
@@ -516,12 +535,11 @@ async function loadTimeline(appId) {
       if (!res.ok) { toast('Delete failed', 'error'); return; }
       toast('Event deleted', 'success');
       await Promise.all([loadApps(), loadStats()]);
-      renderTable(); renderStats(); renderFunnel(); renderWeekly();
+      renderAll();
       const refreshed = state.apps.find(a => a.id === appId);
       if (refreshed) {
         state.currentApp = refreshed;
-        document.getElementById('drawer-stage-badge').className = `badge badge-${refreshed.stage}`;
-        document.getElementById('drawer-stage-badge').textContent = STAGE_LABELS[refreshed.stage] || refreshed.stage;
+        updateDrawerBadge(refreshed.stage);
       }
       await loadTimeline(appId);
     });
@@ -543,7 +561,7 @@ async function loadTimeline(appId) {
 
       toast(`Event moved to "${target?.role || target?.company || 'other position'}"`, 'success');
       await Promise.all([loadApps(), loadStats()]);
-      renderTable(); renderStats(); renderFunnel(); renderWeekly();
+      renderAll();
 
       // Refresh the drawer with updated data
       state.siblingApps = state.apps.filter(
@@ -552,8 +570,7 @@ async function loadTimeline(appId) {
       const refreshed = state.apps.find(a => a.id === appId);
       if (refreshed) {
         state.currentApp = refreshed;
-        document.getElementById('drawer-stage-badge').className = `badge badge-${refreshed.stage}`;
-        document.getElementById('drawer-stage-badge').textContent = STAGE_LABELS[refreshed.stage] || refreshed.stage;
+        updateDrawerBadge(refreshed.stage);
       }
       await loadTimeline(appId);
     });
@@ -612,12 +629,11 @@ document.getElementById('add-event-save')?.addEventListener('click', async () =>
 
   toast(`Logged: ${STAGE_LABELS[stage]}`, 'success');
   await Promise.all([loadApps(), loadStats()]);
-  renderTable(); renderStats(); renderFunnel(); renderWeekly();
+  renderAll();
   const refreshed = state.apps.find(a => a.id === app.id);
   if (refreshed) {
     state.currentApp = refreshed;
-    document.getElementById('drawer-stage-badge').className = `badge badge-${refreshed.stage}`;
-    document.getElementById('drawer-stage-badge').textContent = STAGE_LABELS[refreshed.stage] || refreshed.stage;
+    updateDrawerBadge(refreshed.stage);
     const moveSelect = document.getElementById('move-stage-select');
     if (moveSelect) moveSelect.value = refreshed.stage;
   }
@@ -645,8 +661,7 @@ document.getElementById('move-stage-btn')?.addEventListener('click', async () =>
   document.getElementById('move-stage-notes').value = '';
   document.getElementById('move-stage-date').value = '';
   state.currentApp = { ...app, stage };
-  document.getElementById('drawer-stage-badge').className = `badge badge-${stage}`;
-  document.getElementById('drawer-stage-badge').textContent = STAGE_LABELS[stage] || stage;
+  updateDrawerBadge(stage);
 
   await Promise.all([loadApps(), loadStats(), loadTimeline(app.id)]);
   renderTable();
@@ -713,7 +728,7 @@ document.getElementById('split-confirm')?.addEventListener('click', async () => 
   document.getElementById('split-modal-overlay').classList.remove('open');
   toast(`New position "${role}" created — open it to reassign emails`, 'success');
   await Promise.all([loadApps(), loadStats()]);
-  renderTable(); renderStats(); renderFunnel(); renderWeekly();
+  renderAll();
 
   // Refresh siblings in current drawer
   if (state.currentApp) {
@@ -875,7 +890,7 @@ document.getElementById('settings-reclassify')?.addEventListener('click', async 
     );
     closeSettings();
     await Promise.all([loadApps(), loadStats()]);
-    renderStats(); renderFunnel(); renderWeekly(); renderTable();
+    renderAll();
   } finally {
     btn.disabled = false;
     btn.textContent = original;
@@ -940,7 +955,7 @@ document.getElementById('sync-emails-btn')?.addEventListener('click', async () =
       toast(`Email sync done — ${r.applications_updated || 0} updated, ${r.ghosted_flagged || 0} ghosted`, 'success');
     }
     await Promise.all([loadApps(), loadStats()]);
-    renderTable(); renderStats(); renderFunnel(); renderWeekly();
+    renderAll();
   });
 });
 
@@ -966,7 +981,7 @@ document.getElementById('sync-calendar-btn')?.addEventListener('click', async ()
       toast(`Calendar sync done — ${r.applications_updated || 0} updated`, 'success');
     }
     await Promise.all([loadApps(), loadStats()]);
-    renderTable(); renderStats(); renderFunnel(); renderWeekly();
+    renderAll();
   });
 });
 
@@ -987,7 +1002,8 @@ if (filterStageSelect) {
 
 function esc(str) {
   if (!str) return '';
-  return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 
 function fmtDate(str) {

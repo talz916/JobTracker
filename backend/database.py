@@ -1,13 +1,53 @@
 import sqlite3
 import os
 from typing import Optional, List
-from datetime import datetime, timedelta, date as date_type
+from datetime import datetime, timedelta, timezone, date as date_type
 from contextlib import contextmanager
+from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
-DB_PATH = os.getenv("DATABASE_PATH", "jobhunter.db")
+# Anchor the default DB to the project root: a CWD-relative path silently
+# creates a second, empty database when the server is launched from another
+# directory (e.g. backend/), making all data appear to vanish.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DB_PATH = os.getenv("DATABASE_PATH") or str(_PROJECT_ROOT / "jobhunter.db")
+
+
+def utc_now_iso() -> str:
+    """Canonical timestamp format for every datetime stored in the DB:
+    naive UTC ISO-8601 with a 'T' separator ('YYYY-MM-DDTHH:MM:SS.ffffff').
+    Timestamps are compared as strings in SQL, so a single format is what
+    keeps ordering and cutoff comparisons correct."""
+    return datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+
+
+def to_utc_iso(value) -> Optional[str]:
+    """Normalize a timestamp to the canonical format. Accepts datetime
+    objects, SQLite CURRENT_TIMESTAMP strings ('YYYY-MM-DD HH:MM:SS'), and
+    ISO strings with timezone offsets or 'Z'. Date-only strings (all-day
+    calendar events) pass through unchanged; unparseable values yield None."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        v = str(value).strip()
+        if len(v) == 10:
+            try:
+                datetime.strptime(v, "%Y-%m-%d")
+                return v
+            except ValueError:
+                return None
+        v = v.replace(" ", "T", 1).replace("Z", "+00:00")
+        try:
+            dt = datetime.fromisoformat(v)
+        except ValueError:
+            return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt.isoformat()
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS applications (
@@ -30,6 +70,7 @@ CREATE TABLE IF NOT EXISTS stage_events (
     event_date DATETIME,
     subject TEXT,
     thread_id TEXT,
+    message_id TEXT,
     calendar_event_id TEXT,
     snippet TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -39,9 +80,6 @@ CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT
 );
-
-CREATE UNIQUE INDEX IF NOT EXISTS idx_thread
-    ON stage_events(thread_id) WHERE thread_id IS NOT NULL;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_cal_event
     ON stage_events(calendar_event_id) WHERE calendar_event_id IS NOT NULL;
@@ -53,12 +91,21 @@ DEFAULT_SETTINGS = {
     "min_confidence": "0.6",
 }
 
+# Internal record that caches threads/events classified as not job-related.
+# Hidden from the UI; may be deleted by reset_email_cache, so callers must
+# always go through get_or_create_placeholder() instead of caching its id.
+PLACEHOLDER_COMPANY = "__skipped__"
+
 
 @contextmanager
 def get_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    # WAL lets the background sync write while API requests read, and the
+    # busy timeout prevents 'database is locked' under brief write contention
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 5000")
     try:
         yield conn
         conn.commit()
@@ -91,6 +138,37 @@ def init_db():
             )
         except Exception:
             pass  # Column already exists
+        # Migrate: track individual messages within a thread so replies
+        # (rejections, interview invites) update the stage. The old index was
+        # unique on thread_id alone, which locked a thread after its first
+        # message forever.
+        try:
+            conn.execute("ALTER TABLE stage_events ADD COLUMN message_id TEXT")
+        except Exception:
+            pass  # Column already exists
+        conn.execute("DROP INDEX IF EXISTS idx_thread")
+        conn.execute(
+            """CREATE UNIQUE INDEX IF NOT EXISTS idx_thread_msg
+               ON stage_events(thread_id, message_id) WHERE thread_id IS NOT NULL"""
+        )
+        # Migrate: normalize legacy timestamps to the canonical naive-UTC ISO
+        # format. Rows used to mix SQLite CURRENT_TIMESTAMP ('YYYY-MM-DD
+        # HH:MM:SS'), naive isoformat(), and email dates carrying arbitrary
+        # timezone offsets — string comparison across those formats broke
+        # ghosted-detection cutoffs and event ordering.
+        for table, cols in (("applications", ("last_updated",)),
+                            ("stage_events", ("event_date", "created_at"))):
+            rows = conn.execute(
+                f"SELECT id, {', '.join(cols)} FROM {table}"
+            ).fetchall()
+            for row in rows:
+                for col in cols:
+                    normalized = to_utc_iso(row[col])
+                    if normalized is not None and normalized != row[col]:
+                        conn.execute(
+                            f"UPDATE {table} SET {col} = ? WHERE id = ?",
+                            (normalized, row["id"]),
+                        )
 
 
 # ── Settings ──────────────────────────────────────────────────────────────────
@@ -120,9 +198,9 @@ def create_application(company: str, role: Optional[str], stage: str,
     with get_db() as conn:
         cur = conn.execute(
             """INSERT INTO applications
-               (company, role, stage, applied_date, source, notes, job_url)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (company, role, stage, applied_date, source, notes, job_url),
+               (company, role, stage, applied_date, source, notes, job_url, last_updated)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (company, role, stage, applied_date, source, notes, job_url, utc_now_iso()),
         )
         row = conn.execute(
             "SELECT * FROM applications WHERE id = ?", (cur.lastrowid,)
@@ -195,7 +273,7 @@ def list_applications(stage: Optional[str] = None, company: Optional[str] = None
 def update_application(app_id: int, **fields) -> Optional[dict]:
     if not fields:
         return get_application(app_id)
-    fields["last_updated"] = datetime.utcnow().isoformat()
+    fields["last_updated"] = utc_now_iso()
     set_clause = ", ".join(f"{k} = ?" for k in fields)
     values = list(fields.values()) + [app_id]
     with get_db() as conn:
@@ -213,7 +291,7 @@ def archive_application(app_id: int):
     with get_db() as conn:
         conn.execute(
             "UPDATE applications SET archived = 1, last_updated = ? WHERE id = ?",
-            (datetime.utcnow().isoformat(), app_id),
+            (utc_now_iso(), app_id),
         )
 
 
@@ -226,7 +304,7 @@ def delete_application(app_id: int):
 def merge_applications(keep_id: int, merge_ids: List[int]) -> Optional[dict]:
     """Move all stage events from merge_ids into keep_id, then delete the duplicates.
     The kept record is updated to the most advanced stage across all merged apps."""
-    from backend.models import STAGE_RANK, TERMINAL_STAGES
+    from backend.models import best_stage
     all_ids = [keep_id] + merge_ids
     with get_db() as conn:
         # Fetch all apps being merged
@@ -238,14 +316,7 @@ def merge_applications(keep_id: int, merge_ids: List[int]) -> Optional[dict]:
         if len(apps) < 2:
             return None
 
-        # Determine best stage: terminal stages take priority, otherwise highest rank
-        def stage_priority(stage):
-            if stage in TERMINAL_STAGES:
-                return (1, 0)
-            rank = STAGE_RANK.get(stage)
-            return (0, rank or 0)
-
-        best_stage = max((a["stage"] for a in apps), key=stage_priority)
+        merged_stage = best_stage(a["stage"] for a in apps)
 
         # Reassign stage_events — skip unique constraint conflicts (duplicate thread/cal IDs)
         for merge_id in merge_ids:
@@ -259,7 +330,7 @@ def merge_applications(keep_id: int, merge_ids: List[int]) -> Optional[dict]:
         # Update kept record with best stage and merge notes
         conn.execute(
             "UPDATE applications SET stage = ?, last_updated = ? WHERE id = ?",
-            (best_stage, datetime.utcnow().isoformat(), keep_id),
+            (merged_stage, utc_now_iso(), keep_id),
         )
 
         # Delete the merged duplicates
@@ -274,12 +345,31 @@ def merge_applications(keep_id: int, merge_ids: List[int]) -> Optional[dict]:
             """INSERT INTO stage_events
                (application_id, stage, event_type, event_date, subject)
                VALUES (?, ?, 'manual', ?, ?)""",
-            (keep_id, best_stage, datetime.utcnow().isoformat(),
+            (keep_id, merged_stage, utc_now_iso(),
              f"Merged duplicates: {merged_companies}"),
         )
 
         row = conn.execute("SELECT * FROM applications WHERE id = ?", (keep_id,)).fetchone()
         return dict(row) if row else None
+
+
+def get_or_create_placeholder() -> int:
+    """Return the id of the '__skipped__' placeholder application, creating it
+    if missing. Looked up on every call: reset_email_cache can delete the
+    placeholder, so a cached id would point at a dead row and every subsequent
+    stage-event insert would fail its foreign-key check."""
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT id FROM applications WHERE company = ?", (PLACEHOLDER_COMPANY,)
+        ).fetchone()
+        if row:
+            return row["id"]
+    app = create_application(
+        company=PLACEHOLDER_COMPANY, role=None, stage="other",
+        applied_date=None, source="auto",
+        notes="Internal placeholder for non-job-related items", job_url=None,
+    )
+    return app["id"]
 
 
 # ── Stage Events ───────────────────────────────────────────────────────────────
@@ -301,6 +391,39 @@ def thread_exists(thread_id: str) -> bool:
     return row is not None
 
 
+def thread_message_ids(thread_id: str) -> set:
+    """All Gmail message ids already recorded for a thread. May contain None
+    for rows written before message-level tracking existed."""
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT message_id FROM stage_events WHERE thread_id = ?", (thread_id,)
+        ).fetchall()
+    return {r["message_id"] for r in rows}
+
+
+def all_thread_message_ids() -> dict:
+    """Map of thread_id -> set of recorded message ids, loaded in one query so
+    the sync doesn't issue one lookup per thread."""
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT thread_id, message_id FROM stage_events WHERE thread_id IS NOT NULL"
+        ).fetchall()
+    result: dict = {}
+    for r in rows:
+        result.setdefault(r["thread_id"], set()).add(r["message_id"])
+    return result
+
+
+def backfill_thread_message_id(thread_id: str, message_id: str):
+    """Stamp pre-migration rows (message_id NULL) with the thread's first
+    message id so the thread isn't endlessly re-classified after upgrade."""
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE stage_events SET message_id = ? WHERE thread_id = ? AND message_id IS NULL",
+            (message_id, thread_id),
+        )
+
+
 def cal_event_exists(cal_event_id: str) -> bool:
     with get_db() as conn:
         row = conn.execute(
@@ -313,26 +436,22 @@ def insert_stage_event(application_id: int, stage: str, event_type: str,
                         event_date=None, subject: Optional[str] = None,
                         thread_id: Optional[str] = None,
                         calendar_event_id: Optional[str] = None,
-                        snippet: Optional[str] = None):
+                        snippet: Optional[str] = None,
+                        message_id: Optional[str] = None):
     with get_db() as conn:
         conn.execute(
             """INSERT OR IGNORE INTO stage_events
                (application_id, stage, event_type, event_date, subject,
-                thread_id, calendar_event_id, snippet)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (application_id, stage, event_type, event_date, subject,
-             thread_id, calendar_event_id, snippet),
+                thread_id, message_id, calendar_event_id, snippet, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (application_id, stage, event_type, to_utc_iso(event_date), subject,
+             thread_id, message_id, calendar_event_id, snippet, utc_now_iso()),
         )
 
 
 def delete_event(event_id: int) -> bool:
     """Delete a stage_event and recalculate the parent application's stage."""
-    from backend.models import STAGE_RANK, TERMINAL_STAGES
-
-    def _best_stage(stages):
-        def priority(s):
-            return (1, 0) if s in TERMINAL_STAGES else (0, STAGE_RANK.get(s, 0))
-        return max(stages, key=priority)
+    from backend.models import best_stage
 
     with get_db() as conn:
         event = conn.execute(
@@ -352,19 +471,14 @@ def delete_event(event_id: int) -> bool:
         if remaining:
             conn.execute(
                 "UPDATE applications SET stage = ?, last_updated = ? WHERE id = ?",
-                (_best_stage(remaining), datetime.utcnow().isoformat(), app_id),
+                (best_stage(remaining), utc_now_iso(), app_id),
             )
         return True
 
 
 def update_event_stage(event_id: int, stage: str) -> Optional[dict]:
     """Update a stage_event's stage and recalculate the parent application's stage."""
-    from backend.models import STAGE_RANK, TERMINAL_STAGES
-
-    def _best_stage(stages):
-        def priority(s):
-            return (1, 0) if s in TERMINAL_STAGES else (0, STAGE_RANK.get(s, 0))
-        return max(stages, key=priority)
+    from backend.models import best_stage
 
     with get_db() as conn:
         event = conn.execute(
@@ -386,10 +500,9 @@ def update_event_stage(event_id: int, stage: str) -> Optional[dict]:
             ).fetchall()
         ]
         if all_stages:
-            best = _best_stage(all_stages)
             conn.execute(
                 "UPDATE applications SET stage = ?, last_updated = ? WHERE id = ?",
-                (best, datetime.utcnow().isoformat(), event["application_id"]),
+                (best_stage(all_stages), utc_now_iso(), event["application_id"]),
             )
 
         row = conn.execute(
@@ -400,12 +513,7 @@ def update_event_stage(event_id: int, stage: str) -> Optional[dict]:
 
 def reassign_event(event_id: int, target_app_id: int) -> Optional[dict]:
     """Move a stage_event to a different application and recalculate both apps' stages."""
-    from backend.models import STAGE_RANK, TERMINAL_STAGES
-
-    def _best_stage(stages):
-        def priority(s):
-            return (1, 0) if s in TERMINAL_STAGES else (0, STAGE_RANK.get(s, 0))
-        return max(stages, key=priority)
+    from backend.models import best_stage
 
     with get_db() as conn:
         event = conn.execute(
@@ -438,7 +546,7 @@ def reassign_event(event_id: int, target_app_id: int) -> Optional[dict]:
             if src_stages:
                 conn.execute(
                     "UPDATE applications SET stage = ?, last_updated = ? WHERE id = ?",
-                    (_best_stage(src_stages), datetime.utcnow().isoformat(), source_app_id),
+                    (best_stage(src_stages), utc_now_iso(), source_app_id),
                 )
 
         # Recalculate target app stage
@@ -451,7 +559,7 @@ def reassign_event(event_id: int, target_app_id: int) -> Optional[dict]:
         if tgt_stages:
             conn.execute(
                 "UPDATE applications SET stage = ?, last_updated = ? WHERE id = ?",
-                (_best_stage(tgt_stages), datetime.utcnow().isoformat(), target_app_id),
+                (best_stage(tgt_stages), utc_now_iso(), target_app_id),
             )
 
         return {"event_id": event_id, "application_id": target_app_id}
@@ -531,7 +639,7 @@ def get_stats() -> dict:
         weekly_volume.append({"week": week_str, "count": weekly_map.get(week_str, 0)})
 
     ordered = [
-        "applied", "recruiter_outreach", "phone_screen", "interview",
+        "applied", "phone_screen", "interview",
         "technical_assessment", "hr_interview", "offer",
         "rejected", "declined_offer", "ghosted",
     ]
@@ -593,11 +701,13 @@ def reset_email_cache() -> dict:
 # ── Ghosted auto-detection ─────────────────────────────────────────────────────
 
 def flag_ghosted(ghosted_days: int = 30) -> int:
-    cutoff = (datetime.utcnow() - timedelta(days=ghosted_days)).isoformat()
+    cutoff = (
+        datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=ghosted_days)
+    ).isoformat()
     with get_db() as conn:
         rows = conn.execute(
             """SELECT id FROM applications
-               WHERE stage IN ('applied', 'recruiter_outreach')
+               WHERE stage = 'applied'
                AND archived = 0
                AND last_updated < ?""",
             (cutoff,),
@@ -606,12 +716,12 @@ def flag_ghosted(ghosted_days: int = 30) -> int:
             app_id = row["id"]
             conn.execute(
                 "UPDATE applications SET stage = 'ghosted', last_updated = ? WHERE id = ?",
-                (datetime.utcnow().isoformat(), app_id),
+                (utc_now_iso(), app_id),
             )
             conn.execute(
                 """INSERT OR IGNORE INTO stage_events
                    (application_id, stage, event_type, event_date, subject)
                    VALUES (?, 'ghosted', 'auto', ?, 'Auto-flagged as ghosted')""",
-                (app_id, datetime.utcnow().isoformat()),
+                (app_id, utc_now_iso()),
             )
     return len(rows)

@@ -3,26 +3,17 @@ import json
 import threading
 from typing import Optional
 from pathlib import Path
-from datetime import datetime
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from dotenv import load_dotenv
 
 import backend.database as db
 from backend.models import (
     ApplicationCreate, ApplicationUpdate, MoveStageRequest,
-    SettingsUpdate, MergeRequest, ALL_STAGES,
+    SettingsUpdate, MergeRequest, ReassignEventRequest,
+    UpdateEventStageRequest, ALL_STAGES,
 )
-from pydantic import BaseModel
-
-
-class ReassignEventRequest(BaseModel):
-    application_id: int
-
-
-class UpdateEventStageRequest(BaseModel):
-    stage: str
 
 load_dotenv(override=True)
 
@@ -82,6 +73,21 @@ def _get_sync_state() -> dict:
         return dict(_sync_state)
 
 
+def _try_start_sync(type_: str) -> bool:
+    """Atomically claim the sync slot. Checking 'running' and then setting it
+    in two separate steps lets two concurrent requests both start a sync,
+    doubling Gmail/Anthropic usage — so the test-and-set happens under one
+    lock acquisition."""
+    with _sync_lock:
+        if _sync_state["running"]:
+            return False
+        _sync_state.update(
+            running=True, type=type_, processed=0, total=0,
+            updated=0, message="Starting…", error=None, result=None,
+        )
+        return True
+
+
 # ── Static files ───────────────────────────────────────────────────────────────
 
 @app.get("/")
@@ -122,18 +128,26 @@ def auth_url():
 
 
 @app.get("/api/auth/callback")
-def auth_callback(request: Request, code: str, state: Optional[str] = None):
+def auth_callback(request: Request, code: Optional[str] = None,
+                  state: Optional[str] = None, error: Optional[str] = None):
     global _pending_flow
-    if _pending_flow is None:
-        return FileResponse(FRONTEND_DIR / "index.html")
+    # User cancelled the consent screen (?error=access_denied), arrived without
+    # a code, or no auth is in progress — back to the dashboard, no stack trace.
+    if error or not code or _pending_flow is None:
+        return RedirectResponse("/", status_code=303)
     flow = _pending_flow
     _pending_flow = None
-    # Pass the full callback URL so fetch_token can validate state and use the PKCE verifier
-    flow.fetch_token(authorization_response=str(request.url))
+    try:
+        # Pass the full callback URL so fetch_token can validate state and use the PKCE verifier
+        flow.fetch_token(authorization_response=str(request.url))
+    except Exception:
+        return RedirectResponse("/?auth_error=1", status_code=303)
     Path(TOKEN_FILE).parent.mkdir(parents=True, exist_ok=True)
     with open(TOKEN_FILE, "w") as f:
         f.write(flow.credentials.to_json())
-    return FileResponse(FRONTEND_DIR / "index.html")
+    # Redirect rather than serving the page here, so the one-time auth code
+    # doesn't linger in the browser's address bar and history.
+    return RedirectResponse("/", status_code=303)
 
 
 # ── Settings ───────────────────────────────────────────────────────────────────
@@ -171,7 +185,7 @@ def create_application(body: ApplicationCreate):
     )
     db.insert_stage_event(
         application_id=application["id"], stage=body.stage,
-        event_type="manual", event_date=datetime.utcnow().isoformat(),
+        event_type="manual", event_date=db.utc_now_iso(),
         subject="Manual entry",
     )
     return application
@@ -211,7 +225,7 @@ def update_application(app_id: int, body: ApplicationUpdate):
     if stage_changed:
         db.insert_stage_event(
             application_id=app_id, stage=updates["stage"],
-            event_type="manual", event_date=datetime.utcnow().isoformat(),
+            event_type="manual", event_date=db.utc_now_iso(),
             subject=f"Stage manually updated to {updates['stage']}",
         )
     return updated
@@ -244,7 +258,7 @@ def log_event(app_id: int, body: MoveStageRequest):
         db.update_application(app_id, stage=body.stage)
     db.insert_stage_event(
         application_id=app_id, stage=body.stage, event_type="manual",
-        event_date=(body.event_date or datetime.utcnow()).isoformat(),
+        event_date=body.event_date or db.utc_now_iso(),
         subject=body.notes or f"Logged: {body.stage}",
         snippet=body.notes,
     )
@@ -261,7 +275,7 @@ def move_stage(app_id: int, body: MoveStageRequest):
     updated = db.update_application(app_id, stage=body.stage)
     db.insert_stage_event(
         application_id=app_id, stage=body.stage, event_type="manual",
-        event_date=(body.event_date or datetime.utcnow()).isoformat(),
+        event_date=body.event_date or db.utc_now_iso(),
         subject=body.notes or f"Manually moved to {body.stage}",
         snippet=body.notes,
     )
@@ -347,14 +361,9 @@ def _run_calendar_sync(min_confidence: float):
 def sync_emails():
     if not Path(TOKEN_FILE).exists():
         raise HTTPException(401, "Not authenticated.")
-    state = _get_sync_state()
-    if state["running"]:
-        raise HTTPException(409, "A sync is already running.")
     settings = db.get_settings()
-    _update_sync(
-        running=True, type_="emails", processed=0, total=0,
-        updated=0, message="Starting…", error=None, result=None,
-    )
+    if not _try_start_sync("emails"):
+        raise HTTPException(409, "A sync is already running.")
     t = threading.Thread(
         target=_run_email_sync,
         args=(
@@ -372,14 +381,9 @@ def sync_emails():
 def sync_calendar():
     if not Path(TOKEN_FILE).exists():
         raise HTTPException(401, "Not authenticated.")
-    state = _get_sync_state()
-    if state["running"]:
-        raise HTTPException(409, "A sync is already running.")
     settings = db.get_settings()
-    _update_sync(
-        running=True, type_="calendar", processed=0, total=0,
-        updated=0, message="Starting…", error=None, result=None,
-    )
+    if not _try_start_sync("calendar"):
+        raise HTTPException(409, "A sync is already running.")
     t = threading.Thread(
         target=_run_calendar_sync,
         args=(float(settings.get("min_confidence", 0.6)),),

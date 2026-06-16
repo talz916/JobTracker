@@ -18,33 +18,31 @@ def _get_client() -> anthropic.Anthropic:
     return _client
 
 
-_EMAIL_SYSTEM = (
-    "You classify emails to determine if they are related to a job application process. "
-    "Respond with JSON only — no markdown, no extra text."
-)
+# The static instructions live in the system block (with a cache breakpoint)
+# so the per-email user message carries only the email itself. Note: at the
+# current prompt size this is below Haiku 4.5's minimum cacheable prefix
+# (4096 tokens), so the breakpoint is inert today — it engages automatically
+# if the instructions ever grow past the minimum, and costs nothing until then.
+_EMAIL_SYSTEM = """\
+You classify emails to determine if they are related to a job application process. \
+Respond with JSON only — no markdown, no extra text.
 
-_EMAIL_PROMPT = """\
-Classify this job-application email. You must read the full body — the subject line is often misleading.
+You must read the full body — the subject line is often misleading.
 
 IMPORTANT: Subject lines frequently contradict the email's actual meaning:
 - A subject like "Opportunity at X" or "Role at X" can contain a rejection in the body.
 - A subject like "Thank you for applying" can be a confirmation OR a rejection.
 - Always let the body content determine the stage. The body is the ground truth.
 
-From: {sender}
-Subject: {subject}
-Body excerpt:
-{body}
-
 Return JSON:
-{{
+{
   "company": "Company Name or null",
   "role": "Job Title or null",
   "stage": "applied|phone_screen|interview|technical_assessment|hr_interview|offer|rejected|other",
   "confidence": 0.0-1.0,
   "is_job_related": true or false,
   "is_referral": true or false
-}}
+}
 
 Stage definitions (use body content to decide, not the subject):
 - applied: application acknowledgment/confirmation, referral notification (e.g. "you've been recommended for a role at X"), OR a recruiter cold-contacting you to pitch an open role. Any initial contact — whether self-applied, referred, or recruiter outreach — is "applied".
@@ -61,20 +59,24 @@ Key distinctions:
 - "We found your profile and think you'd be a great fit" (unprompted cold outreach) → applied (is_referral: false)
 - Subject says "opportunity" but body says "unfortunately we won't be moving forward" → rejected"""
 
-_CALENDAR_PROMPT = """\
-Classify this calendar event. Is it a job interview or hiring-related meeting?
+_EMAIL_PROMPT = """\
+From: {sender}
+Subject: {subject}
+Body excerpt:
+{body}"""
 
-Title: {title}
-Description: {description}
+_CALENDAR_SYSTEM = """\
+You classify calendar events to determine if they are job interviews or \
+hiring-related meetings. Respond with JSON only — no markdown, no extra text.
 
 Return JSON:
-{{
+{
   "company": "Company Name or null",
   "role": "Job Title or null",
   "stage": "phone_screen|interview|technical_assessment|hr_interview|other",
   "confidence": 0.0-1.0,
   "is_job_related": true or false
-}}
+}
 
 Stage definitions:
 - phone_screen: initial recruiter/HR call
@@ -82,6 +84,10 @@ Stage definitions:
 - technical_assessment: technical/coding interview or take-home debrief (after first interview)
 - hr_interview: final-round HR/culture interview
 - other: job-related but doesn't fit"""
+
+_CALENDAR_PROMPT = """\
+Title: {title}
+Description: {description}"""
 
 
 # ATS notification domains where the company name is the subdomain
@@ -162,7 +168,7 @@ def classify_email(sender: str, subject: str, body: str) -> ClassificationResult
         subject=subject,
         body=body[:1500],
     )
-    result = _classify(prompt)
+    result = _classify(prompt, _EMAIL_SYSTEM)
     # Hard override: if the body contains unambiguous rejection language, trust it
     # over the AI stage — Haiku can be fooled by subject lines like "opportunity at X"
     body_lower = body.lower()
@@ -193,15 +199,19 @@ def classify_calendar_event(title: str, description: str) -> ClassificationResul
         title=title,
         description=(description or "")[:400],
     )
-    return _classify(prompt)
+    return _classify(prompt, _CALENDAR_SYSTEM)
 
 
-def _classify(prompt: str) -> ClassificationResult:
+def _classify(prompt: str, system: str) -> ClassificationResult:
     client = _get_client()
     message = client.messages.create(
         model="claude-haiku-4-5-20251001",
         max_tokens=256,
-        system=_EMAIL_SYSTEM,
+        system=[{
+            "type": "text",
+            "text": system,
+            "cache_control": {"type": "ephemeral"},
+        }],
         messages=[{"role": "user", "content": prompt}],
     )
     text = message.content[0].text.strip()
