@@ -158,10 +158,6 @@ Nothing is sent to any other third party.
 
 Features planned or open for contributions. PRs welcome!
 
-- **CI/CD pipeline** — GitHub Actions workflow that lints the Python backend (ruff/flake8), validates the frontend (eslint or basic HTML checks), and runs tests on every push and pull request. Keeps the main branch green and makes contributions safer to merge.
-
-- **Unit testing** — Test suite covering the classifier logic, database CRUD helpers, and stage-transition rules. Priority targets: `classifier.py` (mock the Anthropic API, assert correct stage mapping from sample email text) and `models.py` (stage ordering, ghosted-detection logic).
-
 - **View archive** — A dedicated archive tab or modal listing applications that were manually archived or auto-closed. Should support restoring an entry back to active, and filtering/searching by company or role. Useful for reviewing past cycles before a new job search.
 
 - **AI career coach** — An integrated coaching layer trained on your personal job search data. You provide your CV, cover letters, and any other context (target roles, preferred industries, salary expectations), and the coach analyses your funnel stats to surface specific, actionable guidance: why you might be dropping off after phone screens, which types of roles your profile lands interviews for most consistently, and where your application materials may be underselling you. Goes beyond raw numbers by connecting your conversion rates to the actual content you're submitting — so instead of "your interview rate is low", you get "your CV doesn't reflect the seniority of the roles you're targeting." The coach could also suggest which roles to prioritise applying to based on your historical hit rate in similar positions or industries.
